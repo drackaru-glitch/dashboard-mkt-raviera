@@ -184,11 +184,6 @@ function statusRunway(dias) {
   if (dias <= RUNWAY_ATENCAO) return "atencao";
   return "ok";
 }
-function abreviarMarca(nome) {
-  let n = nome.replace(/^Raviera\s+/i, "");
-  if (n.length > 16) n = n.slice(0, 15) + "…";
-  return n;
-}
 const fmtBRL = (v) => new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL", maximumFractionDigits: 0 }).format(v || 0);
 const fmtNum = (v) => new Intl.NumberFormat("pt-BR").format(Math.round(v || 0));
 const fmtDateShort = (iso) => new Date(iso).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" });
@@ -264,6 +259,25 @@ function Tooltip({ hover, dark }) {
   );
 }
 
+function ChartLegend({ items, dark }) {
+  return (
+    <div className="flex flex-wrap items-center gap-4 mb-3">
+      {items.map((it, i) => (
+        <div key={i} className="flex items-center gap-1.5 text-[11px]">
+          {it.shape === "bar" ? (
+            <span className="inline-block shrink-0 w-2.5 h-2.5 rounded-sm" style={{ backgroundColor: it.color }} />
+          ) : (
+            <svg width="16" height="8" className="shrink-0">
+              <line x1="0" y1="4" x2="16" y2="4" stroke={it.color} strokeWidth="2" strokeDasharray={it.dashed ? "4 3" : undefined} />
+            </svg>
+          )}
+          <span className={dark ? "text-slate-400" : "text-slate-500"}>{it.label}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function EvolutionChart({ data, dark }) {
   const containerRef = useRef(null);
   const CHART_W = useElementWidth(containerRef, 760);
@@ -289,7 +303,7 @@ function EvolutionChart({ data, dark }) {
         ))}
         <path d={areaPath} fill="#3b82f6" fillOpacity="0.15" stroke="none" />
         <path d={data.map((d, i) => (i === 0 ? "M" : "L") + x(i) + "," + yGasto(d.gasto)).join(" ")} fill="none" stroke="#3b82f6" strokeWidth="2" />
-        <path d={linePath} fill="none" stroke="#f59e0b" strokeWidth="2" />
+        <path d={linePath} fill="none" stroke="#f59e0b" strokeWidth="2" strokeDasharray="4 3" />
         {data.map((d, i) => (
           <g key={i}
             onMouseEnter={() => setHover({ xPct: (x(i) / CHART_W) * 100, yPct: (Math.min(yGasto(d.gasto), yLeads(d.quantidade)) / CHART_H) * 100, lines: [d.dataLabel, "Leads: " + fmtNum(d.quantidade), "Investimento: " + fmtBRL(d.gasto)] })}
@@ -314,37 +328,41 @@ function RankingChart({ data, dark }) {
   const CHART_W = useElementWidth(containerRef, 760);
   const [hover, setHover] = useState(null);
   if (!data.length) return <div ref={containerRef} className="h-[280px] flex items-center justify-center text-xs text-slate-500">Sem dados.</div>;
-  const innerW = CHART_W - PAD.left - PAD.right;
-  const innerH = CHART_H - PAD.top - PAD.bottom;
+  // Rótulos ficam na diagonal e a altura reservada para eles cresce com o nome mais longo, pra nunca cortar o texto.
+  const maxLabelLen = Math.max(...data.map((d) => d.marca.length));
+  const pad = { ...PAD, bottom: Math.min(170, Math.max(80, maxLabelLen * 5.4 + 30)) };
+  const chartH = 280 - PAD.bottom + pad.bottom;
+  const innerW = CHART_W - pad.left - pad.right;
+  const innerH = chartH - pad.top - pad.bottom;
   const leadsMax = Math.max(...data.map((d) => d.quantidade)) * 1.2 || 1;
   const gastoMax = Math.max(...data.map((d) => d.gasto)) * 1.2 || 1;
-  const yLeads = scaleFn(0, leadsMax, PAD.top, PAD.top + innerH);
-  const yGasto = scaleFn(0, gastoMax, PAD.top, PAD.top + innerH);
+  const yLeads = scaleFn(0, leadsMax, pad.top, pad.top + innerH);
+  const yGasto = scaleFn(0, gastoMax, pad.top, pad.top + innerH);
   const slot = innerW / data.length;
   const barW = Math.min(30, slot * 0.45);
 
   return (
     <div ref={containerRef} className="relative">
-      <svg viewBox={`0 0 ${CHART_W} ${CHART_H}`} className="w-full h-[280px] block">
+      <svg viewBox={`0 0 ${CHART_W} ${chartH}`} className="w-full block" style={{ height: chartH }}>
         {[0, 0.25, 0.5, 0.75, 1].map((g, i) => (
-          <line key={i} x1={PAD.left} x2={CHART_W - PAD.right} y1={PAD.top + g * innerH} y2={PAD.top + g * innerH} stroke={dark ? "#1e293b" : "#e2e8f0"} strokeWidth="1" />
+          <line key={i} x1={pad.left} x2={CHART_W - pad.right} y1={pad.top + g * innerH} y2={pad.top + g * innerH} stroke={dark ? "#1e293b" : "#e2e8f0"} strokeWidth="1" />
         ))}
         {data.map((d, i) => {
-          const cx = PAD.left + slot * i + slot / 2;
+          const cx = pad.left + slot * i + slot / 2;
           const barY = yLeads(d.quantidade);
           const gastoY = yGasto(d.gasto);
           return (
             <g key={i}
-              onMouseEnter={() => setHover({ xPct: (cx / CHART_W) * 100, yPct: (Math.min(barY, gastoY) / CHART_H) * 100, lines: [d.marca, "Leads: " + fmtNum(d.quantidade), "Investimento: " + fmtBRL(d.gasto)] })}
+              onMouseEnter={() => setHover({ xPct: (cx / CHART_W) * 100, yPct: (Math.min(barY, gastoY) / chartH) * 100, lines: [d.marca, "Leads: " + fmtNum(d.quantidade), "Investimento: " + fmtBRL(d.gasto)] })}
               onMouseLeave={() => setHover(null)}>
-              <rect x={PAD.left + slot * i} y={PAD.top} width={slot} height={innerH} fill="transparent" />
-              <rect x={cx - barW / 2} y={barY} width={barW} height={PAD.top + innerH - barY} fill="#3b82f6" rx="3" />
+              <rect x={pad.left + slot * i} y={pad.top} width={slot} height={innerH} fill="transparent" />
+              <rect x={cx - barW / 2} y={barY} width={barW} height={pad.top + innerH - barY} fill="#3b82f6" rx="3" />
               <circle cx={cx} cy={gastoY} r="3.5" fill="#f59e0b" />
-              <text x={cx} y={CHART_H - PAD.bottom + 14} fontSize="10" textAnchor="end" fill={dark ? "#94a3b8" : "#64748b"} transform={`rotate(-40, ${cx}, ${CHART_H - PAD.bottom + 14})`}>{abreviarMarca(d.marca)}</text>
+              <text x={cx} y={chartH - pad.bottom + 14} fontSize="10" textAnchor="end" fill={dark ? "#94a3b8" : "#64748b"} transform={`rotate(-60, ${cx}, ${chartH - pad.bottom + 14})`}>{d.marca}</text>
             </g>
           );
         })}
-        <path d={data.map((d, i) => (i === 0 ? "M" : "L") + (PAD.left + slot * i + slot / 2) + "," + yGasto(d.gasto)).join(" ")} fill="none" stroke="#f59e0b" strokeWidth="2" />
+        <path d={data.map((d, i) => (i === 0 ? "M" : "L") + (pad.left + slot * i + slot / 2) + "," + yGasto(d.gasto)).join(" ")} fill="none" stroke="#f59e0b" strokeWidth="2" strokeDasharray="4 3" />
       </svg>
       <Tooltip hover={hover} dark={dark} />
     </div>
@@ -391,6 +409,17 @@ function StatusPill({ status, dark }) {
   };
   const { label, cls, IconComp } = map[status];
   return <span className={"inline-flex items-center gap-1 rounded-full px-2 py-1 text-xs font-semibold " + cls}><IconComp className="h-3.5 w-3.5" /> {label}</span>;
+}
+function SortableTh({ label, sortKey, sortConfig, onSort }) {
+  const active = sortConfig.key === sortKey;
+  return (
+    <th className="pb-2 font-semibold cursor-pointer select-none whitespace-nowrap" onClick={() => onSort(sortKey)}>
+      <span className="inline-flex items-center gap-1">
+        {label}
+        {active && (sortConfig.dir === "asc" ? <IconArrowUp className="h-3 w-3" /> : <IconArrowDown className="h-3 w-3" />)}
+      </span>
+    </th>
+  );
 }
 
 function SettingsPanel({ open, onClose, dark, setDark, logoUrl, setLogoUrl }) {
@@ -454,33 +483,36 @@ function RavieraDashboard() {
   const [loading, setLoading] = useState(true);
   const [usingMock, setUsingMock] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
+  const [lastUpdated, setLastUpdated] = useState(null);
+  const [sortConfig, setSortConfig] = useState({ key: "status", dir: "asc" });
 
   useEffect(() => { localStorage.setItem("raviera_theme", dark ? "dark" : "light"); }, [dark]);
   useEffect(() => { if (logoUrl) localStorage.setItem("raviera_logo", logoUrl); else localStorage.removeItem("raviera_logo"); }, [logoUrl]);
 
-  useEffect(() => {
-    let cancelled = false;
-    async function load() {
-      setLoading(true);
-      try {
-        if (!APPS_SCRIPT_URL) throw new Error("URL do Apps Script não configurada.");
-        const json = await fetchAppsScriptData(APPS_SCRIPT_URL);
-        const trafego = (json.trafego || []).map(normalizeTrafegoRow).filter(Boolean);
-        const saldos = (json.saldos || []).map(normalizeSaldoRow).filter(Boolean);
-        if (!cancelled) {
-          setTrafegoData(trafego.length ? trafego : DEMO_TRAFEGO);
-          setSaldosData(saldos.length ? saldos : DEMO_SALDOS);
-          setUsingMock(trafego.length === 0);
-        }
-      } catch (e) {
-        if (!cancelled) { setTrafegoData(DEMO_TRAFEGO); setSaldosData(DEMO_SALDOS); setUsingMock(true); setErrorMsg(e.message); }
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
+  async function refreshData() {
+    setLoading(true);
+    try {
+      if (!APPS_SCRIPT_URL) throw new Error("URL do Apps Script não configurada.");
+      const json = await fetchAppsScriptData(APPS_SCRIPT_URL);
+      const trafego = (json.trafego || []).map(normalizeTrafegoRow).filter(Boolean);
+      const saldos = (json.saldos || []).map(normalizeSaldoRow).filter(Boolean);
+      setTrafegoData(trafego.length ? trafego : DEMO_TRAFEGO);
+      setSaldosData(saldos.length ? saldos : DEMO_SALDOS);
+      setUsingMock(trafego.length === 0);
+      setErrorMsg("");
+    } catch (e) {
+      setTrafegoData(DEMO_TRAFEGO); setSaldosData(DEMO_SALDOS); setUsingMock(true); setErrorMsg(e.message);
+    } finally {
+      setLoading(false);
+      setLastUpdated(new Date());
     }
-    load();
-    return () => { cancelled = true; };
-  }, []);
+  }
+
+  useEffect(() => { refreshData(); }, []);
+
+  function handleSort(key) {
+    setSortConfig((prev) => (prev.key === key ? { key, dir: prev.dir === "asc" ? "desc" : "asc" } : { key, dir: "asc" }));
+  }
 
   // Só considera marcas que existem nas DUAS abas (Tráfego e Saldos)
   const brandsList = useMemo(() => {
@@ -549,6 +581,31 @@ function RavieraDashboard() {
 
   const contasEmRisco = useMemo(() => linhasSaldo.filter((l) => l.status === "critico" || l.status === "atencao").length, [linhasSaldo]);
 
+  const STATUS_ORDER = { critico: 0, atencao: 1, semDados: 2, ok: 3 };
+  const linhasSaldoOrdenadas = useMemo(() => {
+    const arr = [...linhasSaldo];
+    const { key, dir } = sortConfig;
+    const mult = dir === "asc" ? 1 : -1;
+    arr.sort((a, b) => {
+      let av, bv;
+      if (key === "status") { av = STATUS_ORDER[a.status]; bv = STATUS_ORDER[b.status]; }
+      else if (key === "diasRestantes") { av = a.diasRestantes === null ? Infinity : a.diasRestantes; bv = b.diasRestantes === null ? Infinity : b.diasRestantes; }
+      else { av = a[key]; bv = b[key]; }
+      if (typeof av === "string") return av.localeCompare(bv) * mult;
+      return (av - bv) * mult;
+    });
+    return arr;
+  }, [linhasSaldo, sortConfig]);
+
+  const totalsSaldo = useMemo(() => {
+    const t = linhasSaldo.reduce((acc, r) => {
+      acc.gasto += r.gasto; acc.quantidade += r.quantidade; acc.saldoAtual += r.saldoAtual; acc.diarioEsperado += r.diarioEsperado;
+      return acc;
+    }, { gasto: 0, quantidade: 0, saldoAtual: 0, diarioEsperado: 0 });
+    t.cpl = t.quantidade > 0 ? t.gasto / t.quantidade : 0;
+    return t;
+  }, [linhasSaldo]);
+
   const bg = dark ? "bg-slate-950" : "bg-slate-50";
   const text = dark ? "text-slate-100" : "text-slate-900";
   const cardBg = dark ? "bg-slate-900/70 border-slate-800" : "bg-white border-slate-200 shadow-sm";
@@ -606,6 +663,9 @@ function RavieraDashboard() {
               <button key={p.id} onClick={() => setPeriodo(p.id)} className={"px-3 py-1.5 rounded-md text-xs font-semibold transition-colors " + (periodo === p.id ? "bg-blue-600 text-white" : (dark ? "bg-slate-800 text-slate-300 hover:bg-slate-700" : "bg-slate-100 text-slate-600 hover:bg-slate-200"))}>{p.label}</button>
             ))}
           </div>
+          <span className={"text-xs " + mutedText}>
+            {range.start.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" })} – {range.end.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" })}
+          </span>
           {periodo === "custom" && (
             <div className="flex items-center gap-2">
               <input type="date" value={customStart} onChange={(e) => setCustomStart(e.target.value)} className={"px-2 py-1.5 rounded-md border text-xs " + (dark ? "bg-slate-800 border-slate-700 text-slate-100" : "bg-white border-slate-200")} />
@@ -613,14 +673,23 @@ function RavieraDashboard() {
               <input type="date" value={customEnd} onChange={(e) => setCustomEnd(e.target.value)} className={"px-2 py-1.5 rounded-md border text-xs " + (dark ? "bg-slate-800 border-slate-700 text-slate-100" : "bg-white border-slate-200")} />
             </div>
           )}
-          <div className="flex items-center gap-1.5 ml-auto">
-            <IconBuilding className={"h-4 w-4 " + mutedText} />
-            <div className="relative">
-              <select value={marcaFiltro} onChange={(e) => setMarcaFiltro(e.target.value)} className={"appearance-none pl-3 pr-8 py-1.5 rounded-md border text-xs font-semibold cursor-pointer " + (dark ? "bg-slate-800 border-slate-700 text-slate-100" : "bg-white border-slate-200 text-slate-900")}>
-                <option value="todas">Todas as Marcas</option>
-                {brandsEscopo.map((m) => <option key={m} value={m}>{m}</option>)}
-              </select>
-              <IconChevronDown className={"h-3.5 w-3.5 absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none " + mutedText} />
+          <div className="flex items-center gap-3 ml-auto">
+            <div className="flex items-center gap-1.5 text-xs">
+              <span className={mutedText}>{lastUpdated ? "Atualizado às " + lastUpdated.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" }) : ""}</span>
+              <button onClick={refreshData} disabled={loading} aria-label="Atualizar dados"
+                className={"h-7 w-7 flex items-center justify-center rounded-md border disabled:opacity-50 " + (dark ? "bg-slate-800 border-slate-700" : "bg-slate-100 border-slate-200")}>
+                <IconRefresh className={"h-3.5 w-3.5 " + mutedText + (loading ? " animate-spin" : "")} />
+              </button>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <IconBuilding className={"h-4 w-4 " + mutedText} />
+              <div className="relative">
+                <select value={marcaFiltro} onChange={(e) => setMarcaFiltro(e.target.value)} className={"appearance-none pl-3 pr-8 py-1.5 rounded-md border text-xs font-semibold cursor-pointer " + (dark ? "bg-slate-800 border-slate-700 text-slate-100" : "bg-white border-slate-200 text-slate-900")}>
+                  <option value="todas">Todas as Marcas</option>
+                  {brandsEscopo.map((m) => <option key={m} value={m}>{m}</option>)}
+                </select>
+                <IconChevronDown className={"h-3.5 w-3.5 absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none " + mutedText} />
+              </div>
             </div>
           </div>
         </div>
@@ -634,14 +703,22 @@ function RavieraDashboard() {
 
         <div className={"rounded-xl border p-4 " + cardBg}>
           <h2 className="text-sm font-bold mb-1">Investimento Diário vs. Leads Gerados</h2>
-          <p className={"text-xs mb-4 " + mutedText}>Evolução no período selecionado</p>
+          <p className={"text-xs mb-3 " + mutedText}>Evolução no período selecionado</p>
+          <ChartLegend dark={dark} items={[
+            { shape: "line", color: "#3b82f6", label: "Investimento (R$) — área e linha" },
+            { shape: "line", color: "#f59e0b", label: "Leads gerados — linha tracejada e pontos", dashed: true },
+          ]} />
           {loading ? <div className="h-[280px] flex items-center justify-center text-xs text-slate-500">Carregando dados...</div> : <EvolutionChart data={evolucaoDiaria} dark={dark} />}
         </div>
 
         {brandsEscopo.length > 1 && (
           <div className={"rounded-xl border p-4 " + cardBg}>
             <h2 className="text-sm font-bold mb-1">Desempenho por Marca</h2>
-            <p className={"text-xs mb-4 " + mutedText}>Ranking de leads e investimento no período — passe o mouse para ver os valores</p>
+            <p className={"text-xs mb-3 " + mutedText}>Ranking de leads e investimento no período — passe o mouse para ver os valores</p>
+            <ChartLegend dark={dark} items={[
+              { shape: "bar", color: "#3b82f6", label: "Leads gerados — barras" },
+              { shape: "line", color: "#f59e0b", label: "Investimento (R$) — linha tracejada e pontos", dashed: true },
+            ]} />
             <RankingChart data={rankingMarcas} dark={dark} />
           </div>
         )}
@@ -651,12 +728,17 @@ function RavieraDashboard() {
           <p className={"text-xs mb-4 " + mutedText}>Runway estimado: saldo atual ÷ diário esperado · Crítico ≤{RUNWAY_CRITICO}d · Atenção ≤{RUNWAY_ATENCAO}d</p>
           <table className="w-full text-sm min-w-[680px]">
             <thead><tr className={"text-left text-xs uppercase tracking-wide " + mutedText}>
-              <th className="pb-2 font-semibold">Marca</th><th className="pb-2 font-semibold">Investimento</th>
-              <th className="pb-2 font-semibold">Leads</th><th className="pb-2 font-semibold">CPL</th><th className="pb-2 font-semibold">Saldo Atual</th>
-              <th className="pb-2 font-semibold">Diário Esperado</th><th className="pb-2 font-semibold">Runway</th><th className="pb-2 font-semibold">Status</th>
+              <SortableTh label="Marca" sortKey="marca" sortConfig={sortConfig} onSort={handleSort} />
+              <SortableTh label="Investimento" sortKey="gasto" sortConfig={sortConfig} onSort={handleSort} />
+              <SortableTh label="Leads" sortKey="quantidade" sortConfig={sortConfig} onSort={handleSort} />
+              <SortableTh label="CPL" sortKey="cpl" sortConfig={sortConfig} onSort={handleSort} />
+              <SortableTh label="Saldo Atual" sortKey="saldoAtual" sortConfig={sortConfig} onSort={handleSort} />
+              <SortableTh label="Diário Esperado" sortKey="diarioEsperado" sortConfig={sortConfig} onSort={handleSort} />
+              <SortableTh label="Runway" sortKey="diasRestantes" sortConfig={sortConfig} onSort={handleSort} />
+              <SortableTh label="Status" sortKey="status" sortConfig={sortConfig} onSort={handleSort} />
             </tr></thead>
             <tbody className={"divide-y " + (dark ? "divide-slate-800" : "divide-slate-100")}>
-              {linhasSaldo.map((row) => (
+              {linhasSaldoOrdenadas.map((row) => (
                 <tr key={row.marca}>
                   <td className="py-2.5 font-semibold">{row.marca}</td>
                   <td className="py-2.5 tabular-nums">{fmtBRL(row.gasto)}</td>
@@ -669,6 +751,21 @@ function RavieraDashboard() {
                 </tr>
               ))}
             </tbody>
+            <tfoot>
+              <tr className={"border-t font-semibold " + (dark ? "border-slate-800" : "border-slate-200")}>
+                <td className="py-2.5">Total ({linhasSaldo.length})</td>
+                <td className="py-2.5 tabular-nums">{fmtBRL(totalsSaldo.gasto)}</td>
+                <td className="py-2.5 tabular-nums">{fmtNum(totalsSaldo.quantidade)}</td>
+                <td className="py-2.5 tabular-nums">{fmtBRL(totalsSaldo.cpl)}</td>
+                <td className="py-2.5 tabular-nums">{fmtBRL(totalsSaldo.saldoAtual)}</td>
+                <td className="py-2.5 tabular-nums">{fmtBRL(totalsSaldo.diarioEsperado)}</td>
+                <td className="py-2.5" colSpan="2">
+                  <span className={contasEmRisco > 0 ? (dark ? "text-amber-400" : "text-amber-700") : mutedText}>
+                    {contasEmRisco} conta{contasEmRisco === 1 ? "" : "s"} em risco
+                  </span>
+                </td>
+              </tr>
+            </tfoot>
           </table>
         </div>
 
