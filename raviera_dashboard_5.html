@@ -184,11 +184,6 @@ function statusRunway(dias) {
   if (dias <= RUNWAY_ATENCAO) return "atencao";
   return "ok";
 }
-function abreviarMarca(nome) {
-  let n = nome.replace(/^Raviera\s+/i, "");
-  if (n.length > 16) n = n.slice(0, 15) + "…";
-  return n;
-}
 const fmtBRL = (v) => new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL", maximumFractionDigits: 0 }).format(v || 0);
 const fmtNum = (v) => new Intl.NumberFormat("pt-BR").format(Math.round(v || 0));
 const fmtDateShort = (iso) => new Date(iso).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" });
@@ -264,6 +259,22 @@ function Tooltip({ hover, dark }) {
   );
 }
 
+function ChartLegend({ items, dark }) {
+  return (
+    <div className="flex flex-wrap items-center gap-4 mb-3">
+      {items.map((it, i) => (
+        <div key={i} className="flex items-center gap-1.5 text-[11px]">
+          <span
+            className={"inline-block shrink-0 " + (it.shape === "bar" ? "w-2.5 h-2.5 rounded-sm" : "w-3 h-[3px] rounded-full")}
+            style={{ backgroundColor: it.color }}
+          />
+          <span className={dark ? "text-slate-400" : "text-slate-500"}>{it.label}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function EvolutionChart({ data, dark }) {
   const containerRef = useRef(null);
   const CHART_W = useElementWidth(containerRef, 760);
@@ -314,37 +325,41 @@ function RankingChart({ data, dark }) {
   const CHART_W = useElementWidth(containerRef, 760);
   const [hover, setHover] = useState(null);
   if (!data.length) return <div ref={containerRef} className="h-[280px] flex items-center justify-center text-xs text-slate-500">Sem dados.</div>;
-  const innerW = CHART_W - PAD.left - PAD.right;
-  const innerH = CHART_H - PAD.top - PAD.bottom;
+  // Rótulos ficam na diagonal e a altura reservada para eles cresce com o nome mais longo, pra nunca cortar o texto.
+  const maxLabelLen = Math.max(...data.map((d) => d.marca.length));
+  const pad = { ...PAD, bottom: Math.min(170, Math.max(80, maxLabelLen * 5.4 + 30)) };
+  const chartH = 280 - PAD.bottom + pad.bottom;
+  const innerW = CHART_W - pad.left - pad.right;
+  const innerH = chartH - pad.top - pad.bottom;
   const leadsMax = Math.max(...data.map((d) => d.quantidade)) * 1.2 || 1;
   const gastoMax = Math.max(...data.map((d) => d.gasto)) * 1.2 || 1;
-  const yLeads = scaleFn(0, leadsMax, PAD.top, PAD.top + innerH);
-  const yGasto = scaleFn(0, gastoMax, PAD.top, PAD.top + innerH);
+  const yLeads = scaleFn(0, leadsMax, pad.top, pad.top + innerH);
+  const yGasto = scaleFn(0, gastoMax, pad.top, pad.top + innerH);
   const slot = innerW / data.length;
   const barW = Math.min(30, slot * 0.45);
 
   return (
     <div ref={containerRef} className="relative">
-      <svg viewBox={`0 0 ${CHART_W} ${CHART_H}`} className="w-full h-[280px] block">
+      <svg viewBox={`0 0 ${CHART_W} ${chartH}`} className="w-full block" style={{ height: chartH }}>
         {[0, 0.25, 0.5, 0.75, 1].map((g, i) => (
-          <line key={i} x1={PAD.left} x2={CHART_W - PAD.right} y1={PAD.top + g * innerH} y2={PAD.top + g * innerH} stroke={dark ? "#1e293b" : "#e2e8f0"} strokeWidth="1" />
+          <line key={i} x1={pad.left} x2={CHART_W - pad.right} y1={pad.top + g * innerH} y2={pad.top + g * innerH} stroke={dark ? "#1e293b" : "#e2e8f0"} strokeWidth="1" />
         ))}
         {data.map((d, i) => {
-          const cx = PAD.left + slot * i + slot / 2;
+          const cx = pad.left + slot * i + slot / 2;
           const barY = yLeads(d.quantidade);
           const gastoY = yGasto(d.gasto);
           return (
             <g key={i}
-              onMouseEnter={() => setHover({ xPct: (cx / CHART_W) * 100, yPct: (Math.min(barY, gastoY) / CHART_H) * 100, lines: [d.marca, "Leads: " + fmtNum(d.quantidade), "Investimento: " + fmtBRL(d.gasto)] })}
+              onMouseEnter={() => setHover({ xPct: (cx / CHART_W) * 100, yPct: (Math.min(barY, gastoY) / chartH) * 100, lines: [d.marca, "Leads: " + fmtNum(d.quantidade), "Investimento: " + fmtBRL(d.gasto)] })}
               onMouseLeave={() => setHover(null)}>
-              <rect x={PAD.left + slot * i} y={PAD.top} width={slot} height={innerH} fill="transparent" />
-              <rect x={cx - barW / 2} y={barY} width={barW} height={PAD.top + innerH - barY} fill="#3b82f6" rx="3" />
+              <rect x={pad.left + slot * i} y={pad.top} width={slot} height={innerH} fill="transparent" />
+              <rect x={cx - barW / 2} y={barY} width={barW} height={pad.top + innerH - barY} fill="#3b82f6" rx="3" />
               <circle cx={cx} cy={gastoY} r="3.5" fill="#f59e0b" />
-              <text x={cx} y={CHART_H - PAD.bottom + 14} fontSize="10" textAnchor="end" fill={dark ? "#94a3b8" : "#64748b"} transform={`rotate(-40, ${cx}, ${CHART_H - PAD.bottom + 14})`}>{abreviarMarca(d.marca)}</text>
+              <text x={cx} y={chartH - pad.bottom + 14} fontSize="10" textAnchor="end" fill={dark ? "#94a3b8" : "#64748b"} transform={`rotate(-60, ${cx}, ${chartH - pad.bottom + 14})`}>{d.marca}</text>
             </g>
           );
         })}
-        <path d={data.map((d, i) => (i === 0 ? "M" : "L") + (PAD.left + slot * i + slot / 2) + "," + yGasto(d.gasto)).join(" ")} fill="none" stroke="#f59e0b" strokeWidth="2" />
+        <path d={data.map((d, i) => (i === 0 ? "M" : "L") + (pad.left + slot * i + slot / 2) + "," + yGasto(d.gasto)).join(" ")} fill="none" stroke="#f59e0b" strokeWidth="2" />
       </svg>
       <Tooltip hover={hover} dark={dark} />
     </div>
@@ -634,14 +649,22 @@ function RavieraDashboard() {
 
         <div className={"rounded-xl border p-4 " + cardBg}>
           <h2 className="text-sm font-bold mb-1">Investimento Diário vs. Leads Gerados</h2>
-          <p className={"text-xs mb-4 " + mutedText}>Evolução no período selecionado</p>
+          <p className={"text-xs mb-3 " + mutedText}>Evolução no período selecionado</p>
+          <ChartLegend dark={dark} items={[
+            { shape: "line", color: "#3b82f6", label: "Investimento (R$) — área e linha" },
+            { shape: "line", color: "#f59e0b", label: "Leads gerados — linha e pontos" },
+          ]} />
           {loading ? <div className="h-[280px] flex items-center justify-center text-xs text-slate-500">Carregando dados...</div> : <EvolutionChart data={evolucaoDiaria} dark={dark} />}
         </div>
 
         {brandsEscopo.length > 1 && (
           <div className={"rounded-xl border p-4 " + cardBg}>
             <h2 className="text-sm font-bold mb-1">Desempenho por Marca</h2>
-            <p className={"text-xs mb-4 " + mutedText}>Ranking de leads e investimento no período — passe o mouse para ver os valores</p>
+            <p className={"text-xs mb-3 " + mutedText}>Ranking de leads e investimento no período — passe o mouse para ver os valores</p>
+            <ChartLegend dark={dark} items={[
+              { shape: "bar", color: "#3b82f6", label: "Leads gerados — barras" },
+              { shape: "line", color: "#f59e0b", label: "Investimento (R$) — linha e pontos" },
+            ]} />
             <RankingChart data={rankingMarcas} dark={dark} />
           </div>
         )}
