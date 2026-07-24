@@ -1,0 +1,684 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Grupo Raviera · Dashboard de Tráfego Pago</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useMemo, useEffect, useRef } = React;
+
+/* ================================================================== */
+/* 1) CONEXÃO COM O GOOGLE SHEETS (Apps Script Web App)                 */
+/* ================================================================== */
+
+const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzwMAMVHJfuC3REI4OtcuJ83AlWjuY9GxECcRRG9-AYdZkXYcmdy3t2ygtc8wZ-aEX5/exec";
+
+const RUNWAY_CRITICO = 3;
+const RUNWAY_ATENCAO = 7;
+
+/* ================================================================== */
+/* 2) HELPERS DE PARSE                                                  */
+/* ================================================================== */
+
+function normalizeKey(k) {
+  return (k || "").toString().normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+}
+function findValue(row, candidates) {
+  const normalizedRow = {};
+  Object.keys(row).forEach((k) => { normalizedRow[normalizeKey(k)] = row[k]; });
+  for (const c of candidates) {
+    const nk = normalizeKey(c);
+    if (normalizedRow[nk] !== undefined) return normalizedRow[nk];
+  }
+  return undefined;
+}
+function parseBRDate(str) {
+  if (!str) return null;
+  const s = str.toString().trim();
+  if (s.includes("/")) {
+    const [d, m, y] = s.split("/");
+    if (!d || !m || !y) return null;
+    const dt = new Date(Number(y), Number(m) - 1, Number(d));
+    return isNaN(dt) ? null : dt;
+  }
+  const d = new Date(s);
+  return isNaN(d) ? null : d;
+}
+function parseBRNumber(val) {
+  if (val === undefined || val === null || val === "") return 0;
+  if (typeof val === "number") return val;
+  let s = val.toString().trim().replace(/R\$\s?/g, "");
+  if (s.includes(",")) s = s.replace(/\./g, "").replace(",", ".");
+  const n = parseFloat(s);
+  return isNaN(n) ? 0 : n;
+}
+
+/* ================================================================== */
+/* 3) FETCH + NORMALIZAÇÃO                                              */
+/* ================================================================== */
+
+function fetchAppsScriptData(url) {
+  return fetch(url).then((res) => {
+    if (!res.ok) throw new Error("Falha ao buscar dados (status " + res.status + ")");
+    return res.json();
+  });
+}
+function normalizeTrafegoRow(row) {
+  const dataRaw = findValue(row, ["Data"]);
+  const marca = findValue(row, ["Marca"]);
+  const date = parseBRDate(dataRaw);
+  if (!date || !marca || marca.toString().trim() === "Marca") return null;
+  return {
+    data: date.toISOString().slice(0, 10),
+    marca: marca.toString().trim(),
+    quantidade: parseBRNumber(findValue(row, ["Quantidade"])),
+    gasto: parseBRNumber(findValue(row, ["Gasto"])),
+    cpl: parseBRNumber(findValue(row, ["CPL"])),
+  };
+}
+function normalizeSaldoRow(row) {
+  const marca = findValue(row, ["Marca"]);
+  if (!marca) return null;
+  return {
+    marca: marca.toString().trim(),
+    tier: (findValue(row, ["Tier"]) || "").toString().trim(),
+    analista: (findValue(row, ["ID"]) || "").toString().trim(),
+    saldoAtualMeta: parseBRNumber(findValue(row, ["Saldo Atual - Meta", "Saldo Atual Meta"])),
+    diarioEsperadoMeta: parseBRNumber(findValue(row, ["Diário Esperado Meta", "Diario Esperado Meta"])),
+  };
+}
+
+/* ================================================================== */
+/* 4) DADOS DE DEMONSTRAÇÃO                                             */
+/* ================================================================== */
+
+function mulberry32(seed) {
+  return function () {
+    seed |= 0; seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+const DEMO_BRANDS = [
+  { marca: "Nissan Campo Grande", tier: "Popular", analista: "Felipe", leadBase: 46, gastoBase: 3200, saldoMeta: 4800, diarioMeta: 900 },
+  { marca: "BYD Dourados", tier: "Premium", analista: "Renã", leadBase: 58, gastoBase: 4600, saldoMeta: 2100, diarioMeta: 1300 },
+  { marca: "BMW Auto CG", tier: "Luxo", analista: "Felipe", leadBase: 22, gastoBase: 5200, saldoMeta: 9800, diarioMeta: 1500 },
+  { marca: "Jeep Vilhena", tier: "Premium", analista: "Felipe", leadBase: 34, gastoBase: 2800, saldoMeta: 600, diarioMeta: 850 },
+  { marca: "Hyundai CG", tier: "Popular", analista: "Renã", leadBase: 40, gastoBase: 2600, saldoMeta: 5400, diarioMeta: 780 },
+];
+function generateDemoTrafego() {
+  const rng = mulberry32(42);
+  const today = new Date();
+  const DAYS = 60;
+  const records = [];
+  DEMO_BRANDS.forEach((b) => {
+    for (let i = DAYS - 1; i >= 0; i--) {
+      const date = new Date(today);
+      date.setDate(date.getDate() - i);
+      const dow = date.getDay();
+      const weekend = dow === 0 || dow === 6 ? 0.6 : 1;
+      const noise = 0.75 + rng() * 0.5;
+      const gasto = Math.round(b.gastoBase * weekend * noise);
+      const quantidade = Math.max(1, Math.round(b.leadBase * weekend * (0.7 + rng() * 0.6)));
+      records.push({ data: date.toISOString().slice(0, 10), marca: b.marca, quantidade, gasto, cpl: gasto / quantidade });
+    }
+  });
+  return records;
+}
+function generateDemoSaldos() {
+  return DEMO_BRANDS.map((b) => ({ marca: b.marca, tier: b.tier, analista: b.analista, saldoAtualMeta: b.saldoMeta, diarioEsperadoMeta: b.diarioMeta }));
+}
+const DEMO_TRAFEGO = generateDemoTrafego();
+const DEMO_SALDOS = generateDemoSaldos();
+
+/* ================================================================== */
+/* 5) HELPERS DE DATA / AGREGAÇÃO / FORMATAÇÃO                          */
+/* ================================================================== */
+
+function getPeriodRange(periodo, customStart, customEnd) {
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  if (periodo === "ultimos7") {
+    const end = new Date(today); const start = new Date(today);
+    start.setDate(start.getDate() - 6);
+    return { start, end };
+  }
+  if (periodo === "mesAtual") return { start: new Date(today.getFullYear(), today.getMonth(), 1), end: today };
+  if (periodo === "mesAnterior") {
+    return { start: new Date(today.getFullYear(), today.getMonth() - 1, 1), end: new Date(today.getFullYear(), today.getMonth(), 0) };
+  }
+  return {
+    start: customStart ? new Date(customStart) : new Date(today.getFullYear(), today.getMonth(), 1),
+    end: customEnd ? new Date(customEnd) : today,
+  };
+}
+function getPreviousRange({ start, end }) {
+  const lengthDays = Math.round((end - start) / 86400000) + 1;
+  const prevEnd = new Date(start); prevEnd.setDate(prevEnd.getDate() - 1);
+  const prevStart = new Date(prevEnd); prevStart.setDate(prevStart.getDate() - (lengthDays - 1));
+  return { start: prevStart, end: prevEnd };
+}
+function filterByRange(records, range) {
+  return records.filter((r) => { const d = new Date(r.data); return d >= range.start && d <= range.end; });
+}
+function aggregateTrafego(records) {
+  const base = records.reduce((acc, r) => { acc.gasto += r.gasto; acc.quantidade += r.quantidade; return acc; }, { gasto: 0, quantidade: 0 });
+  base.cpl = base.quantidade > 0 ? base.gasto / base.quantidade : 0;
+  return base;
+}
+function variacao(atual, anterior) {
+  if (!anterior) return null;
+  return ((atual - anterior) / anterior) * 100;
+}
+function statusRunway(dias) {
+  if (dias === null) return "semDados";
+  if (dias <= RUNWAY_CRITICO) return "critico";
+  if (dias <= RUNWAY_ATENCAO) return "atencao";
+  return "ok";
+}
+function abreviarMarca(nome) {
+  let n = nome.replace(/^Raviera\s+/i, "");
+  if (n.length > 16) n = n.slice(0, 15) + "…";
+  return n;
+}
+const fmtBRL = (v) => new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL", maximumFractionDigits: 0 }).format(v || 0);
+const fmtNum = (v) => new Intl.NumberFormat("pt-BR").format(Math.round(v || 0));
+const fmtDateShort = (iso) => new Date(iso).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" });
+
+/* ================================================================== */
+/* 6) ÍCONES (SVG inline)                                               */
+/* ================================================================== */
+
+function Icon({ path, className }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className || "h-4 w-4"}>
+      {path}
+    </svg>
+  );
+}
+const IconDollar = (p) => <Icon {...p} path={<><line x1="12" y1="1" x2="12" y2="23" /><path d="M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6" /></>} />;
+const IconUsers = (p) => <Icon {...p} path={<><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M23 21v-2a4 4 0 00-3-3.87" /><path d="M16 3.13a4 4 0 010 7.75" /></>} />;
+const IconTarget = (p) => <Icon {...p} path={<><circle cx="12" cy="12" r="10" /><circle cx="12" cy="12" r="6" /><circle cx="12" cy="12" r="2" /></>} />;
+const IconAlertCircle = (p) => <Icon {...p} path={<><circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" /></>} />;
+const IconBuilding = (p) => <Icon {...p} path={<><path d="M3 21h18" /><path d="M5 21V7l7-4 7 4v14" /><path d="M9 9h.01" /><path d="M9 13h.01" /><path d="M9 17h.01" /><path d="M15 9h.01" /><path d="M15 13h.01" /><path d="M15 17h.01" /></>} />;
+const IconMoon = (p) => <Icon {...p} path={<path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z" />} />;
+const IconSun = (p) => <Icon {...p} path={<><circle cx="12" cy="12" r="5" /><line x1="12" y1="1" x2="12" y2="3" /><line x1="12" y1="21" x2="12" y2="23" /><line x1="4.22" y1="4.22" x2="5.64" y2="5.64" /><line x1="18.36" y1="18.36" x2="19.78" y2="19.78" /><line x1="1" y1="12" x2="3" y2="12" /><line x1="21" y1="12" x2="23" y2="12" /><line x1="4.22" y1="19.78" x2="5.64" y2="18.36" /><line x1="18.36" y1="5.64" x2="19.78" y2="4.22" /></>} />;
+const IconChevronDown = (p) => <Icon {...p} path={<polyline points="6 9 12 15 18 9" />} />;
+const IconArrowUp = (p) => <Icon {...p} path={<><line x1="12" y1="19" x2="12" y2="5" /><polyline points="5 12 12 5 19 12" /></>} />;
+const IconArrowDown = (p) => <Icon {...p} path={<><line x1="12" y1="5" x2="12" y2="19" /><polyline points="19 12 12 19 5 12" /></>} />;
+const IconCalendar = (p) => <Icon {...p} path={<><rect x="3" y="4" width="18" height="18" rx="2" /><line x1="16" y1="2" x2="16" y2="6" /><line x1="8" y1="2" x2="8" y2="6" /><line x1="3" y1="10" x2="21" y2="10" /></>} />;
+const IconGauge = (p) => <Icon {...p} path={<><path d="M12 14l4-4" /><path d="M3.34 19a10 10 0 1117.32 0" /></>} />;
+const IconCheck = (p) => <Icon {...p} path={<><circle cx="12" cy="12" r="10" /><path d="M9 12l2 2 4-4" /></>} />;
+const IconAlertTriangle = (p) => <Icon {...p} path={<><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" /></>} />;
+const IconXCircle = (p) => <Icon {...p} path={<><circle cx="12" cy="12" r="10" /><line x1="15" y1="9" x2="9" y2="15" /><line x1="9" y1="9" x2="15" y2="15" /></>} />;
+const IconRefresh = (p) => <Icon {...p} path={<><path d="M23 4v6h-6" /><path d="M1 20v-6h6" /><path d="M3.51 9a9 9 0 0114.85-3.36L23 10" /><path d="M20.49 15a9 9 0 01-14.85 3.36L1 14" /></>} />;
+const IconSettings = (p) => <Icon {...p} path={<><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z" /></>} />;
+const IconX = (p) => <Icon {...p} path={<><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></>} />;
+const IconImage = (p) => <Icon {...p} path={<><rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><path d="M21 15l-5-5L5 21" /></>} />;
+
+/* ================================================================== */
+/* 7) GRÁFICOS EM SVG NATIVO COM TOOLTIP INTERATIVO                     */
+/* ================================================================== */
+
+const PAD = { top: 14, right: 16, bottom: 58, left: 54 };
+const CHART_H = 280;
+
+function scaleFn(min, max, rangeMin, rangeMax) {
+  if (max === min) max = min + 1;
+  return (v) => rangeMax - ((v - min) / (max - min)) * (rangeMax - rangeMin);
+}
+
+// Mede a largura real do container pra desenhar o SVG em coordenadas 1:1 (sem esticar)
+function useElementWidth(ref, fallback) {
+  const [width, setWidth] = useState(fallback);
+  useEffect(() => {
+    if (!ref.current) return;
+    const update = () => { if (ref.current) setWidth(ref.current.clientWidth || fallback); };
+    update();
+    let ro;
+    if (window.ResizeObserver) { ro = new ResizeObserver(update); ro.observe(ref.current); }
+    window.addEventListener("resize", update);
+    return () => { if (ro) ro.disconnect(); window.removeEventListener("resize", update); };
+  }, [ref]);
+  return width;
+}
+
+function Tooltip({ hover, dark }) {
+  if (!hover) return null;
+  return (
+    <div
+      className={"absolute z-10 pointer-events-none rounded-lg border px-2.5 py-1.5 text-[11px] shadow-lg whitespace-nowrap " +
+        (dark ? "bg-slate-800 border-slate-700 text-slate-100" : "bg-white border-slate-200 text-slate-900")}
+      style={{ left: hover.xPct + "%", top: hover.yPct + "%", transform: "translate(-50%, -125%)" }}
+    >
+      {hover.lines.map((l, i) => <div key={i} className={i === 0 ? "font-semibold" : ""}>{l}</div>)}
+    </div>
+  );
+}
+
+function EvolutionChart({ data, dark }) {
+  const containerRef = useRef(null);
+  const CHART_W = useElementWidth(containerRef, 760);
+  const [hover, setHover] = useState(null);
+  if (!data.length) return <div ref={containerRef} className="h-[280px] flex items-center justify-center text-xs text-slate-500">Sem dados no período.</div>;
+  const innerW = CHART_W - PAD.left - PAD.right;
+  const innerH = CHART_H - PAD.top - PAD.bottom;
+  const gastoMax = Math.max(...data.map((d) => d.gasto)) * 1.15 || 1;
+  const leadsMax = Math.max(...data.map((d) => d.quantidade)) * 1.2 || 1;
+  const yGasto = scaleFn(0, gastoMax, PAD.top, PAD.top + innerH);
+  const yLeads = scaleFn(0, leadsMax, PAD.top, PAD.top + innerH);
+  const x = (i) => PAD.left + (data.length > 1 ? (i / (data.length - 1)) * innerW : innerW / 2);
+  const areaPath = data.map((d, i) => (i === 0 ? "M" : "L") + x(i) + "," + yGasto(d.gasto)).join(" ")
+    + ` L${x(data.length - 1)},${PAD.top + innerH} L${x(0)},${PAD.top + innerH} Z`;
+  const linePath = data.map((d, i) => (i === 0 ? "M" : "L") + x(i) + "," + yLeads(d.quantidade)).join(" ");
+  const step = Math.max(1, Math.floor(data.length / 6));
+
+  return (
+    <div ref={containerRef} className="relative">
+      <svg viewBox={`0 0 ${CHART_W} ${CHART_H}`} className="w-full h-[280px] block">
+        {[0, 0.25, 0.5, 0.75, 1].map((g, i) => (
+          <line key={i} x1={PAD.left} x2={CHART_W - PAD.right} y1={PAD.top + g * innerH} y2={PAD.top + g * innerH} stroke={dark ? "#1e293b" : "#e2e8f0"} strokeWidth="1" />
+        ))}
+        <path d={areaPath} fill="#3b82f6" fillOpacity="0.15" stroke="none" />
+        <path d={data.map((d, i) => (i === 0 ? "M" : "L") + x(i) + "," + yGasto(d.gasto)).join(" ")} fill="none" stroke="#3b82f6" strokeWidth="2" />
+        <path d={linePath} fill="none" stroke="#f59e0b" strokeWidth="2" />
+        {data.map((d, i) => (
+          <g key={i}
+            onMouseEnter={() => setHover({ xPct: (x(i) / CHART_W) * 100, yPct: (Math.min(yGasto(d.gasto), yLeads(d.quantidade)) / CHART_H) * 100, lines: [d.dataLabel, "Leads: " + fmtNum(d.quantidade), "Investimento: " + fmtBRL(d.gasto)] })}
+            onMouseLeave={() => setHover(null)}>
+            <circle cx={x(i)} cy={yLeads(d.quantidade)} r="8" fill="transparent" />
+            <circle cx={x(i)} cy={yLeads(d.quantidade)} r="2.5" fill="#f59e0b" />
+          </g>
+        ))}
+        {data.map((d, i) => (i % step === 0 || i === data.length - 1) && (
+          <text key={i} x={x(i)} y={CHART_H - PAD.bottom + 34} fontSize="10" textAnchor="middle" fill={dark ? "#64748b" : "#94a3b8"}>{d.dataLabel}</text>
+        ))}
+        <text x={PAD.left - 8} y={PAD.top + 4} fontSize="9" textAnchor="end" fill={dark ? "#64748b" : "#94a3b8"}>R${Math.round(gastoMax / 1000)}k</text>
+        <text x={CHART_W - PAD.right + 8} y={PAD.top + 4} fontSize="9" textAnchor="end" fill={dark ? "#64748b" : "#94a3b8"}>{fmtNum(leadsMax)}</text>
+      </svg>
+      <Tooltip hover={hover} dark={dark} />
+    </div>
+  );
+}
+
+function RankingChart({ data, dark }) {
+  const containerRef = useRef(null);
+  const CHART_W = useElementWidth(containerRef, 760);
+  const [hover, setHover] = useState(null);
+  if (!data.length) return <div ref={containerRef} className="h-[280px] flex items-center justify-center text-xs text-slate-500">Sem dados.</div>;
+  const innerW = CHART_W - PAD.left - PAD.right;
+  const innerH = CHART_H - PAD.top - PAD.bottom;
+  const leadsMax = Math.max(...data.map((d) => d.quantidade)) * 1.2 || 1;
+  const gastoMax = Math.max(...data.map((d) => d.gasto)) * 1.2 || 1;
+  const yLeads = scaleFn(0, leadsMax, PAD.top, PAD.top + innerH);
+  const yGasto = scaleFn(0, gastoMax, PAD.top, PAD.top + innerH);
+  const slot = innerW / data.length;
+  const barW = Math.min(30, slot * 0.45);
+
+  return (
+    <div ref={containerRef} className="relative">
+      <svg viewBox={`0 0 ${CHART_W} ${CHART_H}`} className="w-full h-[280px] block">
+        {[0, 0.25, 0.5, 0.75, 1].map((g, i) => (
+          <line key={i} x1={PAD.left} x2={CHART_W - PAD.right} y1={PAD.top + g * innerH} y2={PAD.top + g * innerH} stroke={dark ? "#1e293b" : "#e2e8f0"} strokeWidth="1" />
+        ))}
+        {data.map((d, i) => {
+          const cx = PAD.left + slot * i + slot / 2;
+          const barY = yLeads(d.quantidade);
+          const gastoY = yGasto(d.gasto);
+          return (
+            <g key={i}
+              onMouseEnter={() => setHover({ xPct: (cx / CHART_W) * 100, yPct: (Math.min(barY, gastoY) / CHART_H) * 100, lines: [d.marca, "Leads: " + fmtNum(d.quantidade), "Investimento: " + fmtBRL(d.gasto)] })}
+              onMouseLeave={() => setHover(null)}>
+              <rect x={PAD.left + slot * i} y={PAD.top} width={slot} height={innerH} fill="transparent" />
+              <rect x={cx - barW / 2} y={barY} width={barW} height={PAD.top + innerH - barY} fill="#3b82f6" rx="3" />
+              <circle cx={cx} cy={gastoY} r="3.5" fill="#f59e0b" />
+              <text x={cx} y={CHART_H - PAD.bottom + 14} fontSize="10" textAnchor="end" fill={dark ? "#94a3b8" : "#64748b"} transform={`rotate(-40, ${cx}, ${CHART_H - PAD.bottom + 14})`}>{abreviarMarca(d.marca)}</text>
+            </g>
+          );
+        })}
+        <path d={data.map((d, i) => (i === 0 ? "M" : "L") + (PAD.left + slot * i + slot / 2) + "," + yGasto(d.gasto)).join(" ")} fill="none" stroke="#f59e0b" strokeWidth="2" />
+      </svg>
+      <Tooltip hover={hover} dark={dark} />
+    </div>
+  );
+}
+
+/* ================================================================== */
+/* 8) SUBCOMPONENTES DE UI                                              */
+/* ================================================================== */
+
+function Badge({ value, dark }) {
+  if (value === null || value === undefined || !isFinite(value)) return null;
+  const positive = value >= 0;
+  return (
+    <span className={"inline-flex items-center gap-0.5 rounded-full px-1.5 py-0.5 text-[11px] font-semibold " +
+      (positive ? (dark ? "bg-emerald-500/10 text-emerald-400" : "bg-emerald-50 text-emerald-600") : (dark ? "bg-red-500/10 text-red-400" : "bg-red-50 text-red-600"))}>
+      {positive ? <IconArrowUp className="h-3 w-3" /> : <IconArrowDown className="h-3 w-3" />}
+      {Math.abs(value).toFixed(1).replace(".", ",")}%
+    </span>
+  );
+}
+function KpiCard({ IconComp, label, value, badgeValue, dark, accent }) {
+  return (
+    <div className={"rounded-xl border p-4 flex flex-col gap-3 " + (dark ? "bg-slate-900/70 border-slate-800" : "bg-white border-slate-200 shadow-sm")}>
+      <div className="flex items-center justify-between">
+        <div className={"h-9 w-9 rounded-lg flex items-center justify-center " + (dark ? "bg-slate-800" : "bg-slate-100")} style={{ color: accent }}>
+          <IconComp className="h-5 w-5" />
+        </div>
+        <Badge value={badgeValue} dark={dark} />
+      </div>
+      <div>
+        <p className={"text-[11px] font-medium uppercase tracking-wide " + (dark ? "text-slate-500" : "text-slate-500")}>{label}</p>
+        <p className={"text-xl font-bold tabular-nums tracking-tight " + (dark ? "text-slate-50" : "text-slate-900")}>{value}</p>
+      </div>
+    </div>
+  );
+}
+function StatusPill({ status, dark }) {
+  const map = {
+    ok: { label: "Saldo OK", cls: dark ? "bg-emerald-500/10 text-emerald-400" : "bg-emerald-50 text-emerald-700", IconComp: IconCheck },
+    atencao: { label: "Atenção", cls: dark ? "bg-amber-500/10 text-amber-400" : "bg-amber-50 text-amber-700", IconComp: IconAlertTriangle },
+    critico: { label: "Crítico", cls: dark ? "bg-red-500/10 text-red-400" : "bg-red-50 text-red-700", IconComp: IconXCircle },
+    semDados: { label: "Sem dados", cls: dark ? "bg-slate-500/10 text-slate-400" : "bg-slate-100 text-slate-500", IconComp: IconAlertCircle },
+  };
+  const { label, cls, IconComp } = map[status];
+  return <span className={"inline-flex items-center gap-1 rounded-full px-2 py-1 text-xs font-semibold " + cls}><IconComp className="h-3.5 w-3.5" /> {label}</span>;
+}
+
+function SettingsPanel({ open, onClose, dark, setDark, logoUrl, setLogoUrl }) {
+  const fileRef = useRef(null);
+  if (!open) return null;
+  function handleFile(e) {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => { setLogoUrl(reader.result); };
+    reader.readAsDataURL(file);
+  }
+  return (
+    <div className={"absolute right-0 top-12 z-20 w-72 rounded-xl border p-4 shadow-xl " + (dark ? "bg-slate-900 border-slate-800" : "bg-white border-slate-200")}>
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-sm font-bold">Configurações</h3>
+        <button onClick={onClose} className={dark ? "text-slate-400" : "text-slate-500"}><IconX className="h-4 w-4" /></button>
+      </div>
+      <div className="flex flex-col gap-4">
+        <div>
+          <p className={"text-xs font-medium mb-2 " + (dark ? "text-slate-400" : "text-slate-500")}>Logo da empresa</p>
+          <div className="flex items-center gap-2">
+            <button onClick={() => fileRef.current && fileRef.current.click()}
+              className={"flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold border " + (dark ? "bg-slate-800 border-slate-700 text-slate-200" : "bg-slate-100 border-slate-200 text-slate-700")}>
+              <IconImage className="h-3.5 w-3.5" /> Alterar logo
+            </button>
+            {logoUrl && (
+              <button onClick={() => setLogoUrl(null)} className={"text-xs font-semibold " + (dark ? "text-red-400" : "text-red-600")}>Remover</button>
+            )}
+          </div>
+          <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={handleFile} />
+        </div>
+        <div>
+          <p className={"text-xs font-medium mb-2 " + (dark ? "text-slate-400" : "text-slate-500")}>Tema</p>
+          <div className={"flex items-center rounded-lg p-1 border " + (dark ? "bg-slate-800 border-slate-700" : "bg-slate-100 border-slate-200")}>
+            <button onClick={() => setDark(false)} className={"flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold " + (!dark ? "bg-white text-slate-900 shadow" : (dark ? "text-slate-400" : "text-slate-500"))}><IconSun className="h-3.5 w-3.5" /> Claro</button>
+            <button onClick={() => setDark(true)} className={"flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold " + (dark ? "bg-blue-600 text-white" : "text-slate-500")}><IconMoon className="h-3.5 w-3.5" /> Escuro</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ================================================================== */
+/* 9) APP PRINCIPAL                                                     */
+/* ================================================================== */
+
+function RavieraDashboard() {
+  const [dark, setDark] = useState(() => localStorage.getItem("raviera_theme") !== "light");
+  const [logoUrl, setLogoUrl] = useState(() => localStorage.getItem("raviera_logo") || null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [analistaAtivo, setAnalistaAtivo] = useState("todos");
+  const [marcaFiltro, setMarcaFiltro] = useState("todas");
+  const [periodo, setPeriodo] = useState("mesAtual");
+  const [customStart, setCustomStart] = useState("");
+  const [customEnd, setCustomEnd] = useState("");
+
+  const [trafegoData, setTrafegoData] = useState([]);
+  const [saldosData, setSaldosData] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [usingMock, setUsingMock] = useState(false);
+  const [errorMsg, setErrorMsg] = useState("");
+
+  useEffect(() => { localStorage.setItem("raviera_theme", dark ? "dark" : "light"); }, [dark]);
+  useEffect(() => { if (logoUrl) localStorage.setItem("raviera_logo", logoUrl); else localStorage.removeItem("raviera_logo"); }, [logoUrl]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      setLoading(true);
+      try {
+        if (!APPS_SCRIPT_URL) throw new Error("URL do Apps Script não configurada.");
+        const json = await fetchAppsScriptData(APPS_SCRIPT_URL);
+        const trafego = (json.trafego || []).map(normalizeTrafegoRow).filter(Boolean);
+        const saldos = (json.saldos || []).map(normalizeSaldoRow).filter(Boolean);
+        if (!cancelled) {
+          setTrafegoData(trafego.length ? trafego : DEMO_TRAFEGO);
+          setSaldosData(saldos.length ? saldos : DEMO_SALDOS);
+          setUsingMock(trafego.length === 0);
+        }
+      } catch (e) {
+        if (!cancelled) { setTrafegoData(DEMO_TRAFEGO); setSaldosData(DEMO_SALDOS); setUsingMock(true); setErrorMsg(e.message); }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+    load();
+    return () => { cancelled = true; };
+  }, []);
+
+  // Só considera marcas que existem nas DUAS abas (Tráfego e Saldos)
+  const brandsList = useMemo(() => {
+    const trafegoBrands = new Set(trafegoData.map((r) => r.marca));
+    const saldosBrands = new Set(saldosData.map((r) => r.marca));
+    return Array.from(trafegoBrands).filter((m) => saldosBrands.has(m)).sort();
+  }, [trafegoData, saldosData]);
+
+  const brandToAnalista = useMemo(() => {
+    const map = {};
+    saldosData.forEach((s) => { map[s.marca] = s.analista; });
+    return map;
+  }, [saldosData]);
+
+  const analistas = useMemo(() => {
+    const set = new Set(saldosData.map((s) => s.analista).filter(Boolean));
+    return Array.from(set).sort();
+  }, [saldosData]);
+
+  const brandsEscopo = useMemo(() => {
+    if (analistaAtivo === "todos") return brandsList;
+    return brandsList.filter((m) => brandToAnalista[m] === analistaAtivo);
+  }, [brandsList, analistaAtivo, brandToAnalista]);
+
+  useEffect(() => { setMarcaFiltro("todas"); }, [analistaAtivo]);
+
+  const brandsToShow = useMemo(() => (marcaFiltro === "todas" ? brandsEscopo : [marcaFiltro]), [marcaFiltro, brandsEscopo]);
+
+  const range = useMemo(() => getPeriodRange(periodo, customStart, customEnd), [periodo, customStart, customEnd]);
+  const prevRange = useMemo(() => getPreviousRange(range), [range]);
+
+  const scopedTrafego = useMemo(() => trafegoData.filter((r) => brandsToShow.includes(r.marca)), [trafegoData, brandsToShow]);
+  const currentRecords = useMemo(() => filterByRange(scopedTrafego, range), [scopedTrafego, range]);
+  const previousRecords = useMemo(() => filterByRange(scopedTrafego, prevRange), [scopedTrafego, prevRange]);
+  const currentAgg = useMemo(() => aggregateTrafego(currentRecords), [currentRecords]);
+  const previousAgg = useMemo(() => aggregateTrafego(previousRecords), [previousRecords]);
+
+  const evolucaoDiaria = useMemo(() => {
+    const byDate = {};
+    currentRecords.forEach((r) => {
+      if (!byDate[r.data]) byDate[r.data] = { data: r.data, gasto: 0, quantidade: 0 };
+      byDate[r.data].gasto += r.gasto; byDate[r.data].quantidade += r.quantidade;
+    });
+    return Object.values(byDate).sort((a, b) => a.data.localeCompare(b.data)).map((d) => ({ ...d, dataLabel: fmtDateShort(d.data) }));
+  }, [currentRecords]);
+
+  const rankingMarcas = useMemo(() => {
+    return brandsEscopo.map((marca) => {
+      const recs = filterByRange(trafegoData.filter((r) => r.marca === marca), range);
+      const agg = aggregateTrafego(recs);
+      return { marca, gasto: agg.gasto, quantidade: agg.quantidade };
+    }).sort((a, b) => b.quantidade - a.quantidade);
+  }, [brandsEscopo, range, trafegoData]);
+
+  const linhasSaldo = useMemo(() => {
+    return brandsToShow.map((marca) => {
+      const saldo = saldosData.find((s) => s.marca === marca) || {};
+      const trafRecs = filterByRange(trafegoData.filter((r) => r.marca === marca), range);
+      const agg = aggregateTrafego(trafRecs);
+      const saldoAtual = saldo.saldoAtualMeta || 0;
+      const diarioEsperado = saldo.diarioEsperadoMeta || 0;
+      const diasRestantes = diarioEsperado > 0 ? saldoAtual / diarioEsperado : null;
+      return { marca, tier: saldo.tier || "—", gasto: agg.gasto, quantidade: agg.quantidade, cpl: agg.cpl, saldoAtual, diarioEsperado, diasRestantes, status: statusRunway(diasRestantes) };
+    });
+  }, [brandsToShow, saldosData, trafegoData, range]);
+
+  const contasEmRisco = useMemo(() => linhasSaldo.filter((l) => l.status === "critico" || l.status === "atencao").length, [linhasSaldo]);
+
+  const bg = dark ? "bg-slate-950" : "bg-slate-50";
+  const text = dark ? "text-slate-100" : "text-slate-900";
+  const cardBg = dark ? "bg-slate-900/70 border-slate-800" : "bg-white border-slate-200 shadow-sm";
+  const mutedText = dark ? "text-slate-400" : "text-slate-500";
+
+  return (
+    <div className={"min-h-screen w-full " + bg + " " + text + " font-sans transition-colors"}>
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 flex flex-col gap-6">
+        <header className="flex flex-wrap items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            {logoUrl ? (
+              <img src={logoUrl} alt="Logo" className="h-10 w-auto max-w-[180px] object-contain rounded-md" />
+            ) : (
+              <div className="h-10 w-10 rounded-lg bg-blue-600 flex items-center justify-center shadow-lg shadow-blue-600/20">
+                <IconGauge className="h-5 w-5 text-white" />
+              </div>
+            )}
+            <div>
+              <h1 className="text-lg font-bold tracking-tight leading-none">Grupo Raviera</h1>
+              <p className={"text-xs " + mutedText}>Tráfego Pago &amp; Performance Digital</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 flex-wrap relative">
+            <button onClick={() => setDark(!dark)} className={"h-9 w-9 flex items-center justify-center rounded-lg border " + (dark ? "bg-slate-900 border-slate-800" : "bg-white border-slate-200")} aria-label="Alternar tema">
+              {dark ? <IconSun className="h-4 w-4" /> : <IconMoon className="h-4 w-4" />}
+            </button>
+            <button onClick={() => setSettingsOpen((v) => !v)} className={"h-9 w-9 flex items-center justify-center rounded-lg border " + (dark ? "bg-slate-900 border-slate-800" : "bg-white border-slate-200")} aria-label="Configurações">
+              <IconSettings className="h-4 w-4" />
+            </button>
+            <SettingsPanel open={settingsOpen} onClose={() => setSettingsOpen(false)} dark={dark} setDark={setDark} logoUrl={logoUrl} setLogoUrl={setLogoUrl} />
+          </div>
+        </header>
+
+        {/* ANALISTA SWITCH */}
+        {analistas.length > 0 && (
+          <div className={"flex items-center rounded-lg p-1 border w-fit flex-wrap gap-1 " + (dark ? "bg-slate-900 border-slate-800" : "bg-white border-slate-200")}>
+            <button onClick={() => setAnalistaAtivo("todos")} className={"px-3 py-1.5 rounded-md text-xs font-semibold transition-colors " + (analistaAtivo === "todos" ? "bg-blue-600 text-white" : mutedText)}>Todos</button>
+            {analistas.map((a) => (
+              <button key={a} onClick={() => setAnalistaAtivo(a)} className={"px-3 py-1.5 rounded-md text-xs font-semibold transition-colors " + (analistaAtivo === a ? "bg-blue-600 text-white" : mutedText)}>{a}</button>
+            ))}
+          </div>
+        )}
+
+        {usingMock && (
+          <div className={"rounded-lg border px-3 py-2 flex items-center gap-2 text-xs " + (dark ? "bg-amber-500/5 border-amber-500/20 text-amber-400" : "bg-amber-50 border-amber-200 text-amber-700")}>
+            <IconRefresh className="h-3.5 w-3.5 shrink-0" />
+            Exibindo dados de demonstração. {errorMsg ? "Motivo: " + errorMsg + "." : ""}
+          </div>
+        )}
+
+        <div className={"rounded-xl border p-3 flex flex-wrap items-center gap-3 " + cardBg}>
+          <div className="flex items-center gap-1.5"><IconCalendar className={"h-4 w-4 " + mutedText} /><span className={"text-xs font-medium " + mutedText}>Período:</span></div>
+          <div className="flex flex-wrap gap-1">
+            {[{ id: "mesAtual", label: "Mês Atual" }, { id: "mesAnterior", label: "Mês Anterior" }, { id: "ultimos7", label: "Últimos 7 dias" }, { id: "custom", label: "Customizado" }].map((p) => (
+              <button key={p.id} onClick={() => setPeriodo(p.id)} className={"px-3 py-1.5 rounded-md text-xs font-semibold transition-colors " + (periodo === p.id ? "bg-blue-600 text-white" : (dark ? "bg-slate-800 text-slate-300 hover:bg-slate-700" : "bg-slate-100 text-slate-600 hover:bg-slate-200"))}>{p.label}</button>
+            ))}
+          </div>
+          {periodo === "custom" && (
+            <div className="flex items-center gap-2">
+              <input type="date" value={customStart} onChange={(e) => setCustomStart(e.target.value)} className={"px-2 py-1.5 rounded-md border text-xs " + (dark ? "bg-slate-800 border-slate-700 text-slate-100" : "bg-white border-slate-200")} />
+              <span className={"text-xs " + mutedText}>até</span>
+              <input type="date" value={customEnd} onChange={(e) => setCustomEnd(e.target.value)} className={"px-2 py-1.5 rounded-md border text-xs " + (dark ? "bg-slate-800 border-slate-700 text-slate-100" : "bg-white border-slate-200")} />
+            </div>
+          )}
+          <div className="flex items-center gap-1.5 ml-auto">
+            <IconBuilding className={"h-4 w-4 " + mutedText} />
+            <div className="relative">
+              <select value={marcaFiltro} onChange={(e) => setMarcaFiltro(e.target.value)} className={"appearance-none pl-3 pr-8 py-1.5 rounded-md border text-xs font-semibold cursor-pointer " + (dark ? "bg-slate-800 border-slate-700 text-slate-100" : "bg-white border-slate-200 text-slate-900")}>
+                <option value="todas">Todas as Marcas</option>
+                {brandsEscopo.map((m) => <option key={m} value={m}>{m}</option>)}
+              </select>
+              <IconChevronDown className={"h-3.5 w-3.5 absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none " + mutedText} />
+            </div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <KpiCard IconComp={IconDollar} label="Investimento" value={fmtBRL(currentAgg.gasto)} badgeValue={variacao(currentAgg.gasto, previousAgg.gasto)} dark={dark} accent="#3b82f6" />
+          <KpiCard IconComp={IconUsers} label="Leads Gerados" value={fmtNum(currentAgg.quantidade)} badgeValue={variacao(currentAgg.quantidade, previousAgg.quantidade)} dark={dark} accent="#6366f1" />
+          <KpiCard IconComp={IconTarget} label="CPL Médio" value={fmtBRL(currentAgg.cpl)} badgeValue={variacao(currentAgg.cpl, previousAgg.cpl) !== null ? -variacao(currentAgg.cpl, previousAgg.cpl) : null} dark={dark} accent="#a855f7" />
+          <KpiCard IconComp={IconAlertCircle} label="Contas em Alerta de Saldo" value={fmtNum(contasEmRisco)} dark={dark} accent="#ef4444" />
+        </div>
+
+        <div className={"rounded-xl border p-4 " + cardBg}>
+          <h2 className="text-sm font-bold mb-1">Investimento Diário vs. Leads Gerados</h2>
+          <p className={"text-xs mb-4 " + mutedText}>Evolução no período selecionado</p>
+          {loading ? <div className="h-[280px] flex items-center justify-center text-xs text-slate-500">Carregando dados...</div> : <EvolutionChart data={evolucaoDiaria} dark={dark} />}
+        </div>
+
+        {brandsEscopo.length > 1 && (
+          <div className={"rounded-xl border p-4 " + cardBg}>
+            <h2 className="text-sm font-bold mb-1">Desempenho por Marca</h2>
+            <p className={"text-xs mb-4 " + mutedText}>Ranking de leads e investimento no período — passe o mouse para ver os valores</p>
+            <RankingChart data={rankingMarcas} dark={dark} />
+          </div>
+        )}
+
+        <div className={"rounded-xl border p-4 overflow-x-auto " + cardBg}>
+          <h2 className="text-sm font-bold mb-1">Saldo das Contas de Anúncios (Meta Ads)</h2>
+          <p className={"text-xs mb-4 " + mutedText}>Runway estimado: saldo atual ÷ diário esperado · Crítico ≤{RUNWAY_CRITICO}d · Atenção ≤{RUNWAY_ATENCAO}d</p>
+          <table className="w-full text-sm min-w-[680px]">
+            <thead><tr className={"text-left text-xs uppercase tracking-wide " + mutedText}>
+              <th className="pb-2 font-semibold">Marca</th><th className="pb-2 font-semibold">Investimento</th>
+              <th className="pb-2 font-semibold">Leads</th><th className="pb-2 font-semibold">CPL</th><th className="pb-2 font-semibold">Saldo Atual</th>
+              <th className="pb-2 font-semibold">Diário Esperado</th><th className="pb-2 font-semibold">Runway</th><th className="pb-2 font-semibold">Status</th>
+            </tr></thead>
+            <tbody className={"divide-y " + (dark ? "divide-slate-800" : "divide-slate-100")}>
+              {linhasSaldo.map((row) => (
+                <tr key={row.marca}>
+                  <td className="py-2.5 font-semibold">{row.marca}</td>
+                  <td className="py-2.5 tabular-nums">{fmtBRL(row.gasto)}</td>
+                  <td className="py-2.5 tabular-nums">{fmtNum(row.quantidade)}</td>
+                  <td className="py-2.5 tabular-nums">{fmtBRL(row.cpl)}</td>
+                  <td className="py-2.5 tabular-nums">{fmtBRL(row.saldoAtual)}</td>
+                  <td className="py-2.5 tabular-nums">{fmtBRL(row.diarioEsperado)}</td>
+                  <td className="py-2.5 tabular-nums">{row.diasRestantes !== null ? row.diasRestantes.toFixed(1) + "d" : "—"}</td>
+                  <td className="py-2.5"><StatusPill status={row.status} dark={dark} /></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <footer className={"text-center text-[11px] py-2 " + mutedText}>Grupo Raviera · Vendas e test-drives serão integrados em uma etapa futura (outro sistema)</footer>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<RavieraDashboard />);
+</script>
+</body>
+</html>
