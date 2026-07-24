@@ -1,0 +1,952 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Grupo Raviera · Dashboard de Tráfego Pago</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useMemo, useEffect, useRef } = React;
+
+/* ================================================================== */
+/* 1) CLIENTE DA API (backend próprio, substitui o Apps Script)         */
+/* ================================================================== */
+
+function authFetch(path, token, options = {}) {
+  return fetch(path, { ...options, headers: { ...(options.headers || {}), Authorization: "Bearer " + token } });
+}
+async function authJson(path, token, options = {}) {
+  const res = await authFetch(path, token, {
+    ...options,
+    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail || "Falha na requisição (" + res.status + ")");
+  }
+  if (res.status === 204) return null;
+  return res.json();
+}
+async function login(email, password) {
+  const body = new URLSearchParams();
+  body.set("username", email);
+  body.set("password", password);
+  const res = await fetch("/auth/login", { method: "POST", body });
+  if (!res.ok) throw new Error("E-mail ou senha incorretos.");
+  return res.json();
+}
+
+const RUNWAY_CRITICO = 3;
+const RUNWAY_ATENCAO = 7;
+
+/* ================================================================== */
+/* 2) HELPERS DE DATA / AGREGAÇÃO / FORMATAÇÃO                          */
+/* ================================================================== */
+
+function getPeriodRange(periodo, customStart, customEnd) {
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  if (periodo === "ultimos7") {
+    const end = new Date(today); const start = new Date(today);
+    start.setDate(start.getDate() - 6);
+    return { start, end };
+  }
+  if (periodo === "mesAtual") return { start: new Date(today.getFullYear(), today.getMonth(), 1), end: today };
+  if (periodo === "mesAnterior") {
+    return { start: new Date(today.getFullYear(), today.getMonth() - 1, 1), end: new Date(today.getFullYear(), today.getMonth(), 0) };
+  }
+  return {
+    start: customStart ? new Date(customStart) : new Date(today.getFullYear(), today.getMonth(), 1),
+    end: customEnd ? new Date(customEnd) : today,
+  };
+}
+function getPreviousRange({ start, end }) {
+  const lengthDays = Math.round((end - start) / 86400000) + 1;
+  const prevEnd = new Date(start); prevEnd.setDate(prevEnd.getDate() - 1);
+  const prevStart = new Date(prevEnd); prevStart.setDate(prevStart.getDate() - (lengthDays - 1));
+  return { start: prevStart, end: prevEnd };
+}
+function filterByRange(records, range) {
+  return records.filter((r) => { const d = new Date(r.data); return d >= range.start && d <= range.end; });
+}
+function aggregateTrafego(records) {
+  const base = records.reduce((acc, r) => { acc.gasto += r.gasto; acc.quantidade += r.quantidade; return acc; }, { gasto: 0, quantidade: 0 });
+  base.cpl = base.quantidade > 0 ? base.gasto / base.quantidade : 0;
+  return base;
+}
+function variacao(atual, anterior) {
+  if (!anterior) return null;
+  return ((atual - anterior) / anterior) * 100;
+}
+function statusRunway(dias) {
+  if (dias === null) return "semDados";
+  if (dias <= RUNWAY_CRITICO) return "critico";
+  if (dias <= RUNWAY_ATENCAO) return "atencao";
+  return "ok";
+}
+const fmtBRL = (v) => new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL", maximumFractionDigits: 0 }).format(v || 0);
+const fmtNum = (v) => new Intl.NumberFormat("pt-BR").format(Math.round(v || 0));
+const fmtDateShort = (iso) => new Date(iso).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" });
+
+/* ================================================================== */
+/* 3) ÍCONES (SVG inline)                                               */
+/* ================================================================== */
+
+function Icon({ path, className }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className || "h-4 w-4"}>
+      {path}
+    </svg>
+  );
+}
+const IconDollar = (p) => <Icon {...p} path={<><line x1="12" y1="1" x2="12" y2="23" /><path d="M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6" /></>} />;
+const IconUsers = (p) => <Icon {...p} path={<><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M23 21v-2a4 4 0 00-3-3.87" /><path d="M16 3.13a4 4 0 010 7.75" /></>} />;
+const IconTarget = (p) => <Icon {...p} path={<><circle cx="12" cy="12" r="10" /><circle cx="12" cy="12" r="6" /><circle cx="12" cy="12" r="2" /></>} />;
+const IconAlertCircle = (p) => <Icon {...p} path={<><circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" /></>} />;
+const IconBuilding = (p) => <Icon {...p} path={<><path d="M3 21h18" /><path d="M5 21V7l7-4 7 4v14" /><path d="M9 9h.01" /><path d="M9 13h.01" /><path d="M9 17h.01" /><path d="M15 9h.01" /><path d="M15 13h.01" /><path d="M15 17h.01" /></>} />;
+const IconMoon = (p) => <Icon {...p} path={<path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z" />} />;
+const IconSun = (p) => <Icon {...p} path={<><circle cx="12" cy="12" r="5" /><line x1="12" y1="1" x2="12" y2="3" /><line x1="12" y1="21" x2="12" y2="23" /><line x1="4.22" y1="4.22" x2="5.64" y2="5.64" /><line x1="18.36" y1="18.36" x2="19.78" y2="19.78" /><line x1="1" y1="12" x2="3" y2="12" /><line x1="21" y1="12" x2="23" y2="12" /><line x1="4.22" y1="19.78" x2="5.64" y2="18.36" /><line x1="18.36" y1="5.64" x2="19.78" y2="4.22" /></>} />;
+const IconChevronDown = (p) => <Icon {...p} path={<polyline points="6 9 12 15 18 9" />} />;
+const IconArrowUp = (p) => <Icon {...p} path={<><line x1="12" y1="19" x2="12" y2="5" /><polyline points="5 12 12 5 19 12" /></>} />;
+const IconArrowDown = (p) => <Icon {...p} path={<><line x1="12" y1="5" x2="12" y2="19" /><polyline points="19 12 12 19 5 12" /></>} />;
+const IconCalendar = (p) => <Icon {...p} path={<><rect x="3" y="4" width="18" height="18" rx="2" /><line x1="16" y1="2" x2="16" y2="6" /><line x1="8" y1="2" x2="8" y2="6" /><line x1="3" y1="10" x2="21" y2="10" /></>} />;
+const IconGauge = (p) => <Icon {...p} path={<><path d="M12 14l4-4" /><path d="M3.34 19a10 10 0 1117.32 0" /></>} />;
+const IconCheck = (p) => <Icon {...p} path={<><circle cx="12" cy="12" r="10" /><path d="M9 12l2 2 4-4" /></>} />;
+const IconAlertTriangle = (p) => <Icon {...p} path={<><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" /></>} />;
+const IconXCircle = (p) => <Icon {...p} path={<><circle cx="12" cy="12" r="10" /><line x1="15" y1="9" x2="9" y2="15" /><line x1="9" y1="9" x2="15" y2="15" /></>} />;
+const IconRefresh = (p) => <Icon {...p} path={<><path d="M23 4v6h-6" /><path d="M1 20v-6h6" /><path d="M3.51 9a9 9 0 0114.85-3.36L23 10" /><path d="M20.49 15a9 9 0 01-14.85 3.36L1 14" /></>} />;
+const IconSettings = (p) => <Icon {...p} path={<><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z" /></>} />;
+const IconX = (p) => <Icon {...p} path={<><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></>} />;
+const IconImage = (p) => <Icon {...p} path={<><rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><path d="M21 15l-5-5L5 21" /></>} />;
+const IconLock = (p) => <Icon {...p} path={<><rect x="3" y="11" width="18" height="11" rx="2" /><path d="M7 11V7a5 5 0 0110 0v4" /></>} />;
+const IconLogOut = (p) => <Icon {...p} path={<><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4" /><polyline points="16 17 21 12 16 7" /><line x1="21" y1="12" x2="9" y2="12" /></>} />;
+const IconAward = (p) => <Icon {...p} path={<><circle cx="12" cy="8" r="6" /><path d="M8.21 13.89L7 23l5-3 5 3-1.21-9.12" /></>} />;
+const IconTrash = (p) => <Icon {...p} path={<><polyline points="3 6 5 6 21 6" /><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6" /><path d="M10 11v6" /><path d="M14 11v6" /><path d="M9 6V4a2 2 0 012-2h2a2 2 0 012 2v2" /></>} />;
+
+/* ================================================================== */
+/* 4) GRÁFICOS EM SVG NATIVO COM TOOLTIP INTERATIVO                     */
+/* ================================================================== */
+
+const PAD = { top: 14, right: 16, bottom: 58, left: 54 };
+const CHART_H = 280;
+
+function scaleFn(min, max, rangeMin, rangeMax) {
+  if (max === min) max = min + 1;
+  return (v) => rangeMax - ((v - min) / (max - min)) * (rangeMax - rangeMin);
+}
+
+function useElementWidth(ref, fallback) {
+  const [width, setWidth] = useState(fallback);
+  useEffect(() => {
+    if (!ref.current) return;
+    const update = () => { if (ref.current) setWidth(ref.current.clientWidth || fallback); };
+    update();
+    let ro;
+    if (window.ResizeObserver) { ro = new ResizeObserver(update); ro.observe(ref.current); }
+    window.addEventListener("resize", update);
+    return () => { if (ro) ro.disconnect(); window.removeEventListener("resize", update); };
+  }, [ref]);
+  return width;
+}
+
+function Tooltip({ hover, dark }) {
+  if (!hover) return null;
+  return (
+    <div
+      className={"absolute z-10 pointer-events-none rounded-lg border px-2.5 py-1.5 text-[11px] shadow-lg whitespace-nowrap " +
+        (dark ? "bg-slate-800 border-slate-700 text-slate-100" : "bg-white border-slate-200 text-slate-900")}
+      style={{ left: hover.xPct + "%", top: hover.yPct + "%", transform: "translate(-50%, -125%)" }}
+    >
+      {hover.lines.map((l, i) => <div key={i} className={i === 0 ? "font-semibold" : ""}>{l}</div>)}
+    </div>
+  );
+}
+
+function ChartLegend({ items, dark }) {
+  return (
+    <div className="flex flex-wrap items-center gap-4 mb-3">
+      {items.map((it, i) => (
+        <div key={i} className="flex items-center gap-1.5 text-[11px]">
+          {it.shape === "bar" ? (
+            <span className="inline-block shrink-0 w-2.5 h-2.5 rounded-sm" style={{ backgroundColor: it.color }} />
+          ) : (
+            <svg width="16" height="8" className="shrink-0">
+              <line x1="0" y1="4" x2="16" y2="4" stroke={it.color} strokeWidth="2" strokeDasharray={it.dashed ? "4 3" : undefined} />
+            </svg>
+          )}
+          <span className={dark ? "text-slate-400" : "text-slate-500"}>{it.label}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function EvolutionChart({ data, dark }) {
+  const containerRef = useRef(null);
+  const CHART_W = useElementWidth(containerRef, 760);
+  const [hover, setHover] = useState(null);
+  if (!data.length) return <div ref={containerRef} className="h-[280px] flex items-center justify-center text-xs text-slate-500">Sem dados no período.</div>;
+  const innerW = CHART_W - PAD.left - PAD.right;
+  const innerH = CHART_H - PAD.top - PAD.bottom;
+  const gastoMax = Math.max(...data.map((d) => d.gasto)) * 1.15 || 1;
+  const leadsMax = Math.max(...data.map((d) => d.quantidade)) * 1.2 || 1;
+  const yGasto = scaleFn(0, gastoMax, PAD.top, PAD.top + innerH);
+  const yLeads = scaleFn(0, leadsMax, PAD.top, PAD.top + innerH);
+  const x = (i) => PAD.left + (data.length > 1 ? (i / (data.length - 1)) * innerW : innerW / 2);
+  const areaPath = data.map((d, i) => (i === 0 ? "M" : "L") + x(i) + "," + yGasto(d.gasto)).join(" ")
+    + ` L${x(data.length - 1)},${PAD.top + innerH} L${x(0)},${PAD.top + innerH} Z`;
+  const linePath = data.map((d, i) => (i === 0 ? "M" : "L") + x(i) + "," + yLeads(d.quantidade)).join(" ");
+  const step = Math.max(1, Math.floor(data.length / 6));
+
+  return (
+    <div ref={containerRef} className="relative">
+      <svg viewBox={`0 0 ${CHART_W} ${CHART_H}`} className="w-full h-[280px] block">
+        {[0, 0.25, 0.5, 0.75, 1].map((g, i) => (
+          <line key={i} x1={PAD.left} x2={CHART_W - PAD.right} y1={PAD.top + g * innerH} y2={PAD.top + g * innerH} stroke={dark ? "#1e293b" : "#e2e8f0"} strokeWidth="1" />
+        ))}
+        <path d={areaPath} fill="#3b82f6" fillOpacity="0.15" stroke="none" />
+        <path d={data.map((d, i) => (i === 0 ? "M" : "L") + x(i) + "," + yGasto(d.gasto)).join(" ")} fill="none" stroke="#3b82f6" strokeWidth="2" />
+        <path d={linePath} fill="none" stroke="#f59e0b" strokeWidth="2" strokeDasharray="4 3" />
+        {data.map((d, i) => (
+          <g key={i}
+            onMouseEnter={() => setHover({ xPct: (x(i) / CHART_W) * 100, yPct: (Math.min(yGasto(d.gasto), yLeads(d.quantidade)) / CHART_H) * 100, lines: [d.dataLabel, "Leads: " + fmtNum(d.quantidade), "Investimento: " + fmtBRL(d.gasto)] })}
+            onMouseLeave={() => setHover(null)}>
+            <circle cx={x(i)} cy={yLeads(d.quantidade)} r="8" fill="transparent" />
+            <circle cx={x(i)} cy={yLeads(d.quantidade)} r="2.5" fill="#f59e0b" />
+          </g>
+        ))}
+        {data.map((d, i) => (i % step === 0 || i === data.length - 1) && (
+          <text key={i} x={x(i)} y={CHART_H - PAD.bottom + 34} fontSize="10" textAnchor="middle" fill={dark ? "#64748b" : "#94a3b8"}>{d.dataLabel}</text>
+        ))}
+        <text x={PAD.left - 8} y={PAD.top + 4} fontSize="9" textAnchor="end" fill={dark ? "#64748b" : "#94a3b8"}>R${Math.round(gastoMax / 1000)}k</text>
+        <text x={CHART_W - PAD.right + 8} y={PAD.top + 4} fontSize="9" textAnchor="end" fill={dark ? "#64748b" : "#94a3b8"}>{fmtNum(leadsMax)}</text>
+      </svg>
+      <Tooltip hover={hover} dark={dark} />
+    </div>
+  );
+}
+
+function RankingChart({ data, dark }) {
+  const containerRef = useRef(null);
+  const CHART_W = useElementWidth(containerRef, 760);
+  const [hover, setHover] = useState(null);
+  if (!data.length) return <div ref={containerRef} className="h-[280px] flex items-center justify-center text-xs text-slate-500">Sem dados.</div>;
+  const maxLabelLen = Math.max(...data.map((d) => d.marca.length));
+  const pad = { ...PAD, bottom: Math.min(170, Math.max(80, maxLabelLen * 5.4 + 30)) };
+  const chartH = 280 - PAD.bottom + pad.bottom;
+  const innerW = CHART_W - pad.left - pad.right;
+  const innerH = chartH - pad.top - pad.bottom;
+  const leadsMax = Math.max(...data.map((d) => d.quantidade)) * 1.2 || 1;
+  const gastoMax = Math.max(...data.map((d) => d.gasto)) * 1.2 || 1;
+  const yLeads = scaleFn(0, leadsMax, pad.top, pad.top + innerH);
+  const yGasto = scaleFn(0, gastoMax, pad.top, pad.top + innerH);
+  const slot = innerW / data.length;
+  const barW = Math.min(30, slot * 0.45);
+
+  return (
+    <div ref={containerRef} className="relative">
+      <svg viewBox={`0 0 ${CHART_W} ${chartH}`} className="w-full block" style={{ height: chartH }}>
+        {[0, 0.25, 0.5, 0.75, 1].map((g, i) => (
+          <line key={i} x1={pad.left} x2={CHART_W - pad.right} y1={pad.top + g * innerH} y2={pad.top + g * innerH} stroke={dark ? "#1e293b" : "#e2e8f0"} strokeWidth="1" />
+        ))}
+        {data.map((d, i) => {
+          const cx = pad.left + slot * i + slot / 2;
+          const barY = yLeads(d.quantidade);
+          const gastoY = yGasto(d.gasto);
+          return (
+            <g key={i}
+              onMouseEnter={() => setHover({ xPct: (cx / CHART_W) * 100, yPct: (Math.min(barY, gastoY) / chartH) * 100, lines: [d.marca, "Leads: " + fmtNum(d.quantidade), "Investimento: " + fmtBRL(d.gasto)] })}
+              onMouseLeave={() => setHover(null)}>
+              <rect x={pad.left + slot * i} y={pad.top} width={slot} height={innerH} fill="transparent" />
+              <rect x={cx - barW / 2} y={barY} width={barW} height={pad.top + innerH - barY} fill="#3b82f6" rx="3" />
+              <circle cx={cx} cy={gastoY} r="3.5" fill="#f59e0b" />
+              <text x={cx} y={chartH - pad.bottom + 14} fontSize="10" textAnchor="end" fill={dark ? "#94a3b8" : "#64748b"} transform={`rotate(-60, ${cx}, ${chartH - pad.bottom + 14})`}>{d.marca}</text>
+            </g>
+          );
+        })}
+        <path d={data.map((d, i) => (i === 0 ? "M" : "L") + (pad.left + slot * i + slot / 2) + "," + yGasto(d.gasto)).join(" ")} fill="none" stroke="#f59e0b" strokeWidth="2" strokeDasharray="4 3" />
+      </svg>
+      <Tooltip hover={hover} dark={dark} />
+    </div>
+  );
+}
+
+/* ================================================================== */
+/* 5) SUBCOMPONENTES DE UI                                              */
+/* ================================================================== */
+
+function Badge({ value, dark }) {
+  if (value === null || value === undefined || !isFinite(value)) return null;
+  const positive = value >= 0;
+  return (
+    <span className={"inline-flex items-center gap-0.5 rounded-full px-1.5 py-0.5 text-[11px] font-semibold " +
+      (positive ? (dark ? "bg-emerald-500/10 text-emerald-400" : "bg-emerald-50 text-emerald-600") : (dark ? "bg-red-500/10 text-red-400" : "bg-red-50 text-red-600"))}>
+      {positive ? <IconArrowUp className="h-3 w-3" /> : <IconArrowDown className="h-3 w-3" />}
+      {Math.abs(value).toFixed(1).replace(".", ",")}%
+    </span>
+  );
+}
+function KpiCard({ IconComp, label, value, badgeValue, dark, accent }) {
+  return (
+    <div className={"rounded-xl border p-4 flex flex-col gap-3 " + (dark ? "bg-slate-900/70 border-slate-800" : "bg-white border-slate-200 shadow-sm")}>
+      <div className="flex items-center justify-between">
+        <div className={"h-9 w-9 rounded-lg flex items-center justify-center " + (dark ? "bg-slate-800" : "bg-slate-100")} style={{ color: accent }}>
+          <IconComp className="h-5 w-5" />
+        </div>
+        <Badge value={badgeValue} dark={dark} />
+      </div>
+      <div>
+        <p className={"text-[11px] font-medium uppercase tracking-wide " + (dark ? "text-slate-500" : "text-slate-500")}>{label}</p>
+        <p className={"text-xl font-bold tabular-nums tracking-tight " + (dark ? "text-slate-50" : "text-slate-900")}>{value}</p>
+      </div>
+    </div>
+  );
+}
+function StatusPill({ status, dark }) {
+  const map = {
+    ok: { label: "Saldo OK", cls: dark ? "bg-emerald-500/10 text-emerald-400" : "bg-emerald-50 text-emerald-700", IconComp: IconCheck },
+    atencao: { label: "Atenção", cls: dark ? "bg-amber-500/10 text-amber-400" : "bg-amber-50 text-amber-700", IconComp: IconAlertTriangle },
+    critico: { label: "Crítico", cls: dark ? "bg-red-500/10 text-red-400" : "bg-red-50 text-red-700", IconComp: IconXCircle },
+    semDados: { label: "Sem dados", cls: dark ? "bg-slate-500/10 text-slate-400" : "bg-slate-100 text-slate-500", IconComp: IconAlertCircle },
+  };
+  const { label, cls, IconComp } = map[status];
+  return <span className={"inline-flex items-center gap-1 rounded-full px-2 py-1 text-xs font-semibold " + cls}><IconComp className="h-3.5 w-3.5" /> {label}</span>;
+}
+function SortableTh({ label, sortKey, sortConfig, onSort }) {
+  const active = sortConfig.key === sortKey;
+  return (
+    <th className="pb-2 font-semibold cursor-pointer select-none whitespace-nowrap" onClick={() => onSort(sortKey)}>
+      <span className="inline-flex items-center gap-1">
+        {label}
+        {active && (sortConfig.dir === "asc" ? <IconArrowUp className="h-3 w-3" /> : <IconArrowDown className="h-3 w-3" />)}
+      </span>
+    </th>
+  );
+}
+function SettingsPanel({ open, onClose, dark, setDark, logoUrl, setLogoUrl }) {
+  const fileRef = useRef(null);
+  if (!open) return null;
+  function handleFile(e) {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => { setLogoUrl(reader.result); };
+    reader.readAsDataURL(file);
+  }
+  return (
+    <div className={"absolute right-0 top-12 z-20 w-72 rounded-xl border p-4 shadow-xl " + (dark ? "bg-slate-900 border-slate-800" : "bg-white border-slate-200")}>
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-sm font-bold">Aparência</h3>
+        <button onClick={onClose} className={dark ? "text-slate-400" : "text-slate-500"}><IconX className="h-4 w-4" /></button>
+      </div>
+      <div className="flex flex-col gap-4">
+        <div>
+          <p className={"text-xs font-medium mb-2 " + (dark ? "text-slate-400" : "text-slate-500")}>Logo da empresa</p>
+          <div className="flex items-center gap-2">
+            <button onClick={() => fileRef.current && fileRef.current.click()}
+              className={"flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold border " + (dark ? "bg-slate-800 border-slate-700 text-slate-200" : "bg-slate-100 border-slate-200 text-slate-700")}>
+              <IconImage className="h-3.5 w-3.5" /> Alterar logo
+            </button>
+            {logoUrl && (
+              <button onClick={() => setLogoUrl(null)} className={"text-xs font-semibold " + (dark ? "text-red-400" : "text-red-600")}>Remover</button>
+            )}
+          </div>
+          <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={handleFile} />
+        </div>
+        <div>
+          <p className={"text-xs font-medium mb-2 " + (dark ? "text-slate-400" : "text-slate-500")}>Tema</p>
+          <div className={"flex items-center rounded-lg p-1 border " + (dark ? "bg-slate-800 border-slate-700" : "bg-slate-100 border-slate-200")}>
+            <button onClick={() => setDark(false)} className={"flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold " + (!dark ? "bg-white text-slate-900 shadow" : (dark ? "text-slate-400" : "text-slate-500"))}><IconSun className="h-3.5 w-3.5" /> Claro</button>
+            <button onClick={() => setDark(true)} className={"flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold " + (dark ? "bg-blue-600 text-white" : "text-slate-500")}><IconMoon className="h-3.5 w-3.5" /> Escuro</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+function TopCreativeCard({ item, dark, cardBg, mutedText }) {
+  return (
+    <div className={"rounded-xl border p-3 flex gap-3 items-center " + cardBg}>
+      <div className={"h-14 w-14 shrink-0 rounded-lg overflow-hidden flex items-center justify-center " + (dark ? "bg-slate-800" : "bg-slate-100")}>
+        {item.thumbnailUrl ? (
+          <img src={item.thumbnailUrl} alt="Criativo" className="h-full w-full object-cover" />
+        ) : (
+          <IconImage className={"h-5 w-5 " + mutedText} />
+        )}
+      </div>
+      <div className="min-w-0">
+        <p className={"text-[11px] font-medium uppercase tracking-wide truncate " + mutedText}>{item.marca}</p>
+        <p className="text-sm font-semibold truncate">{item.nomeAnuncio || "—"}</p>
+        <p className={"text-xs " + mutedText}>{item.metricaLabel}</p>
+      </div>
+    </div>
+  );
+}
+
+/* ================================================================== */
+/* 6) LOGIN                                                             */
+/* ================================================================== */
+
+function LoginScreen({ onLogin }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    setError("");
+    setLoading(true);
+    try {
+      const result = await login(email, password);
+      onLogin(result);
+    } catch (err) {
+      setError(err.message || "Não foi possível entrar.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="min-h-screen w-full bg-slate-950 text-slate-100 flex items-center justify-center px-4">
+      <form onSubmit={handleSubmit} className="w-full max-w-sm bg-slate-900/70 border border-slate-800 rounded-xl p-6 flex flex-col gap-4">
+        <div className="flex items-center gap-3 mb-2">
+          <div className="h-10 w-10 rounded-lg bg-blue-600 flex items-center justify-center shadow-lg shadow-blue-600/20">
+            <IconGauge className="h-5 w-5 text-white" />
+          </div>
+          <div>
+            <h1 className="text-lg font-bold leading-none">Grupo Raviera</h1>
+            <p className="text-xs text-slate-400">Dashboard de Tráfego Pago</p>
+          </div>
+        </div>
+        {error && <div className="text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-md px-3 py-2">{error}</div>}
+        <div className="flex flex-col gap-1">
+          <label className="text-xs font-medium text-slate-400">E-mail</label>
+          <input type="email" required value={email} onChange={(e) => setEmail(e.target.value)}
+            className="px-3 py-2 rounded-md bg-slate-800 border border-slate-700 text-sm" />
+        </div>
+        <div className="flex flex-col gap-1">
+          <label className="text-xs font-medium text-slate-400">Senha</label>
+          <input type="password" required value={password} onChange={(e) => setPassword(e.target.value)}
+            className="px-3 py-2 rounded-md bg-slate-800 border border-slate-700 text-sm" />
+        </div>
+        <button type="submit" disabled={loading}
+          className="mt-2 flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-60 text-white text-sm font-semibold rounded-md py-2">
+          <IconLock className="h-3.5 w-3.5" /> {loading ? "Entrando..." : "Entrar"}
+        </button>
+      </form>
+    </div>
+  );
+}
+
+/* ================================================================== */
+/* 7) ÁREA DE CONFIGURAÇÃO (admin)                                      */
+/* ================================================================== */
+
+function AdminPanel({ token, dark, cardBg, mutedText }) {
+  const [accounts, setAccounts] = useState([]);
+  const [brands, setBrands] = useState([]);
+  const [users, setUsers] = useState([]);
+  const [error, setError] = useState("");
+
+  async function reload() {
+    try {
+      const [a, b, u] = await Promise.all([
+        authJson("/admin/ad-accounts", token),
+        authJson("/admin/brands", token),
+        authJson("/admin/users", token),
+      ]);
+      setAccounts(a); setBrands(b); setUsers(u);
+    } catch (e) {
+      setError(e.message);
+    }
+  }
+  useEffect(() => { reload(); }, []);
+
+  async function withErrorHandling(fn) {
+    try {
+      await fn();
+      await reload();
+    } catch (e) {
+      setError(e.message);
+    }
+  }
+
+  const [newAccount, setNewAccount] = useState({ meta_account_id: "", nome: "" });
+  const [newBrand, setNewBrand] = useState({ nome: "", tier: "", ad_account_id: "", campaign_filter: "", diario_esperado_meta: 0 });
+  const [newUser, setNewUser] = useState({ email: "", password: "", role: "gerente", brand_ids: [] });
+
+  const inputCls = "px-2 py-1.5 rounded-md border text-xs " + (dark ? "bg-slate-800 border-slate-700 text-slate-100" : "bg-white border-slate-200 text-slate-900");
+
+  return (
+    <div className="flex flex-col gap-6">
+      {error && <div className="text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-md px-3 py-2">{error}</div>}
+
+      <div className={"rounded-xl border p-4 " + cardBg}>
+        <h2 className="text-sm font-bold mb-3">Contas de Anúncio (Meta)</h2>
+        <table className="w-full text-sm mb-3">
+          <thead><tr className={"text-left text-xs uppercase " + mutedText}><th className="pb-2">ID Meta</th><th className="pb-2">Nome</th><th className="pb-2"></th></tr></thead>
+          <tbody className={"divide-y " + (dark ? "divide-slate-800" : "divide-slate-100")}>
+            {accounts.map((a) => (
+              <tr key={a.id}>
+                <td className="py-1.5">{a.meta_account_id}</td>
+                <td className="py-1.5">{a.nome}</td>
+                <td className="py-1.5 text-right">
+                  <button onClick={() => withErrorHandling(() => authJson(`/admin/ad-accounts/${a.id}`, token, { method: "DELETE" }))} className="text-red-500"><IconTrash className="h-3.5 w-3.5" /></button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <div className="flex flex-wrap gap-2 items-end">
+          <input placeholder="act_123456789" className={inputCls} value={newAccount.meta_account_id} onChange={(e) => setNewAccount({ ...newAccount, meta_account_id: e.target.value })} />
+          <input placeholder="Nome (ex: Conta BMW/MINI)" className={inputCls} value={newAccount.nome} onChange={(e) => setNewAccount({ ...newAccount, nome: e.target.value })} />
+          <button onClick={() => withErrorHandling(async () => { await authJson("/admin/ad-accounts", token, { method: "POST", body: JSON.stringify(newAccount) }); setNewAccount({ meta_account_id: "", nome: "" }); })}
+            className="px-3 py-1.5 rounded-md text-xs font-semibold bg-blue-600 text-white">Adicionar conta</button>
+        </div>
+      </div>
+
+      <div className={"rounded-xl border p-4 " + cardBg}>
+        <h2 className="text-sm font-bold mb-1">Marcas</h2>
+        <p className={"text-xs mb-3 " + mutedText}>Se várias marcas dividem a mesma conta, use "Filtro de campanha" com o prefixo do nome das campanhas de cada marca no Meta.</p>
+        <table className="w-full text-sm mb-3 min-w-[640px]">
+          <thead><tr className={"text-left text-xs uppercase " + mutedText}>
+            <th className="pb-2">Marca</th><th className="pb-2">Tier</th><th className="pb-2">Conta</th><th className="pb-2">Filtro campanha</th><th className="pb-2">Diário esperado</th><th className="pb-2"></th>
+          </tr></thead>
+          <tbody className={"divide-y " + (dark ? "divide-slate-800" : "divide-slate-100")}>
+            {brands.map((b) => (
+              <tr key={b.id}>
+                <td className="py-1.5 font-semibold">{b.nome}</td>
+                <td className="py-1.5">{b.tier}</td>
+                <td className="py-1.5">{(accounts.find((a) => a.id === b.ad_account_id) || {}).nome || "—"}</td>
+                <td className="py-1.5">{b.campaign_filter || "—"}</td>
+                <td className="py-1.5">{fmtBRL(b.diario_esperado_meta)}</td>
+                <td className="py-1.5 text-right">
+                  <button onClick={() => withErrorHandling(() => authJson(`/admin/brands/${b.id}`, token, { method: "DELETE" }))} className="text-red-500"><IconTrash className="h-3.5 w-3.5" /></button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <div className="flex flex-wrap gap-2 items-end">
+          <input placeholder="Nome da marca" className={inputCls} value={newBrand.nome} onChange={(e) => setNewBrand({ ...newBrand, nome: e.target.value })} />
+          <input placeholder="Tier" className={inputCls} value={newBrand.tier} onChange={(e) => setNewBrand({ ...newBrand, tier: e.target.value })} />
+          <select className={inputCls} value={newBrand.ad_account_id} onChange={(e) => setNewBrand({ ...newBrand, ad_account_id: e.target.value })}>
+            <option value="">Conta de anúncio...</option>
+            {accounts.map((a) => <option key={a.id} value={a.id}>{a.nome}</option>)}
+          </select>
+          <input placeholder="Filtro de campanha (opcional)" className={inputCls} value={newBrand.campaign_filter} onChange={(e) => setNewBrand({ ...newBrand, campaign_filter: e.target.value })} />
+          <input type="number" placeholder="Diário esperado" className={inputCls} value={newBrand.diario_esperado_meta} onChange={(e) => setNewBrand({ ...newBrand, diario_esperado_meta: e.target.value })} />
+          <button onClick={() => withErrorHandling(async () => {
+            await authJson("/admin/brands", token, { method: "POST", body: JSON.stringify({ ...newBrand, ad_account_id: newBrand.ad_account_id ? Number(newBrand.ad_account_id) : null, diario_esperado_meta: Number(newBrand.diario_esperado_meta) || 0 }) });
+            setNewBrand({ nome: "", tier: "", ad_account_id: "", campaign_filter: "", diario_esperado_meta: 0 });
+          })} className="px-3 py-1.5 rounded-md text-xs font-semibold bg-blue-600 text-white">Adicionar marca</button>
+        </div>
+      </div>
+
+      <div className={"rounded-xl border p-4 " + cardBg}>
+        <h2 className="text-sm font-bold mb-3">Usuários</h2>
+        <table className="w-full text-sm mb-3 min-w-[640px]">
+          <thead><tr className={"text-left text-xs uppercase " + mutedText}><th className="pb-2">E-mail</th><th className="pb-2">Papel</th><th className="pb-2">Marcas</th><th className="pb-2"></th></tr></thead>
+          <tbody className={"divide-y " + (dark ? "divide-slate-800" : "divide-slate-100")}>
+            {users.map((u) => (
+              <tr key={u.id}>
+                <td className="py-1.5">{u.email}</td>
+                <td className="py-1.5">{u.role}</td>
+                <td className="py-1.5">{u.role === "admin" ? "Todas" : u.brand_ids.map((id) => (brands.find((b) => b.id === id) || {}).nome).filter(Boolean).join(", ") || "Nenhuma"}</td>
+                <td className="py-1.5 text-right">
+                  <button onClick={() => withErrorHandling(() => authJson(`/admin/users/${u.id}`, token, { method: "DELETE" }))} className="text-red-500"><IconTrash className="h-3.5 w-3.5" /></button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <div className="flex flex-col gap-2">
+          <div className="flex flex-wrap gap-2 items-end">
+            <input type="email" placeholder="E-mail" className={inputCls} value={newUser.email} onChange={(e) => setNewUser({ ...newUser, email: e.target.value })} />
+            <input type="password" placeholder="Senha inicial" className={inputCls} value={newUser.password} onChange={(e) => setNewUser({ ...newUser, password: e.target.value })} />
+            <select className={inputCls} value={newUser.role} onChange={(e) => setNewUser({ ...newUser, role: e.target.value })}>
+              <option value="gerente">Gerente</option>
+              <option value="admin">Admin</option>
+            </select>
+          </div>
+          {newUser.role === "gerente" && (
+            <div className="flex flex-wrap gap-2">
+              {brands.map((b) => {
+                const checked = newUser.brand_ids.includes(b.id);
+                return (
+                  <label key={b.id} className={"text-xs px-2 py-1 rounded-md border cursor-pointer " + (checked ? "bg-blue-600 text-white border-blue-600" : inputCls)}>
+                    <input type="checkbox" className="hidden" checked={checked} onChange={() => {
+                      setNewUser({ ...newUser, brand_ids: checked ? newUser.brand_ids.filter((id) => id !== b.id) : [...newUser.brand_ids, b.id] });
+                    }} />
+                    {b.nome}
+                  </label>
+                );
+              })}
+            </div>
+          )}
+          <button onClick={() => withErrorHandling(async () => {
+            await authJson("/admin/users", token, { method: "POST", body: JSON.stringify(newUser) });
+            setNewUser({ email: "", password: "", role: "gerente", brand_ids: [] });
+          })} className="self-start px-3 py-1.5 rounded-md text-xs font-semibold bg-blue-600 text-white">Adicionar usuário</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ================================================================== */
+/* 8) DASHBOARD PRINCIPAL                                               */
+/* ================================================================== */
+
+function RavieraDashboard({ token, role, email, onLogout }) {
+  const [dark, setDark] = useState(() => localStorage.getItem("raviera_theme") !== "light");
+  const [logoUrl, setLogoUrl] = useState(() => localStorage.getItem("raviera_logo") || null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [view, setView] = useState("dashboard"); // "dashboard" | "config"
+  const [marcaFiltro, setMarcaFiltro] = useState("todas");
+  const [periodo, setPeriodo] = useState("mesAtual");
+  const [customStart, setCustomStart] = useState("");
+  const [customEnd, setCustomEnd] = useState("");
+  const [sortConfig, setSortConfig] = useState({ key: "status", dir: "asc" });
+
+  const [dashboardData, setDashboardData] = useState({ brands: [], trafego: [], saldos: [], topCreatives: [], meta: {} });
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  useEffect(() => { localStorage.setItem("raviera_theme", dark ? "dark" : "light"); }, [dark]);
+  useEffect(() => { if (logoUrl) localStorage.setItem("raviera_logo", logoUrl); else localStorage.removeItem("raviera_logo"); }, [logoUrl]);
+
+  async function loadDashboard() {
+    setLoading(true);
+    try {
+      const data = await authJson("/api/dashboard", token);
+      setDashboardData(data);
+      setError("");
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+  async function refreshData() {
+    setLoading(true);
+    try {
+      await authJson("/api/sync", token, { method: "POST" });
+      await loadDashboard();
+    } catch (e) {
+      setError(e.message);
+      setLoading(false);
+    }
+  }
+  useEffect(() => { loadDashboard(); }, []);
+
+  const brandsList = useMemo(() => dashboardData.brands.map((b) => b.nome).sort(), [dashboardData.brands]);
+  const brandsToShow = useMemo(() => (marcaFiltro === "todas" ? brandsList : [marcaFiltro]), [marcaFiltro, brandsList]);
+
+  const range = useMemo(() => getPeriodRange(periodo, customStart, customEnd), [periodo, customStart, customEnd]);
+  const prevRange = useMemo(() => getPreviousRange(range), [range]);
+
+  const scopedTrafego = useMemo(() => dashboardData.trafego.filter((r) => brandsToShow.includes(r.marca)), [dashboardData.trafego, brandsToShow]);
+  const currentRecords = useMemo(() => filterByRange(scopedTrafego, range), [scopedTrafego, range]);
+  const previousRecords = useMemo(() => filterByRange(scopedTrafego, prevRange), [scopedTrafego, prevRange]);
+  const currentAgg = useMemo(() => aggregateTrafego(currentRecords), [currentRecords]);
+  const previousAgg = useMemo(() => aggregateTrafego(previousRecords), [previousRecords]);
+
+  const evolucaoDiaria = useMemo(() => {
+    const byDate = {};
+    currentRecords.forEach((r) => {
+      if (!byDate[r.data]) byDate[r.data] = { data: r.data, gasto: 0, quantidade: 0 };
+      byDate[r.data].gasto += r.gasto; byDate[r.data].quantidade += r.quantidade;
+    });
+    return Object.values(byDate).sort((a, b) => a.data.localeCompare(b.data)).map((d) => ({ ...d, dataLabel: fmtDateShort(d.data) }));
+  }, [currentRecords]);
+
+  const rankingMarcas = useMemo(() => {
+    return brandsList.map((marca) => {
+      const recs = filterByRange(dashboardData.trafego.filter((r) => r.marca === marca), range);
+      const agg = aggregateTrafego(recs);
+      return { marca, gasto: agg.gasto, quantidade: agg.quantidade };
+    }).filter((r) => brandsToShow.includes(r.marca)).sort((a, b) => b.quantidade - a.quantidade);
+  }, [brandsList, brandsToShow, range, dashboardData.trafego]);
+
+  const linhasSaldo = useMemo(() => {
+    return brandsToShow.map((marca) => {
+      const saldo = dashboardData.saldos.find((s) => s.marca === marca) || {};
+      const trafRecs = filterByRange(dashboardData.trafego.filter((r) => r.marca === marca), range);
+      const agg = aggregateTrafego(trafRecs);
+      const saldoAtual = saldo.saldoAtualMeta || 0;
+      const diarioEsperado = saldo.diarioEsperadoMeta || 0;
+      const diasRestantes = diarioEsperado > 0 ? saldoAtual / diarioEsperado : null;
+      return { marca, tier: saldo.tier || "—", gasto: agg.gasto, quantidade: agg.quantidade, cpl: agg.cpl, saldoAtual, diarioEsperado, diasRestantes, status: statusRunway(diasRestantes) };
+    });
+  }, [brandsToShow, dashboardData.saldos, dashboardData.trafego, range]);
+
+  const contasEmRisco = useMemo(() => linhasSaldo.filter((l) => l.status === "critico" || l.status === "atencao").length, [linhasSaldo]);
+
+  const STATUS_ORDER = { critico: 0, atencao: 1, semDados: 2, ok: 3 };
+  const linhasSaldoOrdenadas = useMemo(() => {
+    const arr = [...linhasSaldo];
+    const { key, dir } = sortConfig;
+    const mult = dir === "asc" ? 1 : -1;
+    arr.sort((a, b) => {
+      let av, bv;
+      if (key === "status") { av = STATUS_ORDER[a.status]; bv = STATUS_ORDER[b.status]; }
+      else if (key === "diasRestantes") { av = a.diasRestantes === null ? Infinity : a.diasRestantes; bv = b.diasRestantes === null ? Infinity : b.diasRestantes; }
+      else { av = a[key]; bv = b[key]; }
+      if (typeof av === "string") return av.localeCompare(bv) * mult;
+      return (av - bv) * mult;
+    });
+    return arr;
+  }, [linhasSaldo, sortConfig]);
+
+  const totalsSaldo = useMemo(() => {
+    const t = linhasSaldo.reduce((acc, r) => {
+      acc.gasto += r.gasto; acc.quantidade += r.quantidade; acc.saldoAtual += r.saldoAtual; acc.diarioEsperado += r.diarioEsperado;
+      return acc;
+    }, { gasto: 0, quantidade: 0, saldoAtual: 0, diarioEsperado: 0 });
+    t.cpl = t.quantidade > 0 ? t.gasto / t.quantidade : 0;
+    return t;
+  }, [linhasSaldo]);
+
+  const topCreativesToShow = useMemo(
+    () => dashboardData.topCreatives.filter((c) => brandsToShow.includes(c.marca)),
+    [dashboardData.topCreatives, brandsToShow]
+  );
+
+  function handleSort(key) {
+    setSortConfig((prev) => (prev.key === key ? { key, dir: prev.dir === "asc" ? "desc" : "asc" } : { key, dir: "asc" }));
+  }
+
+  const bg = dark ? "bg-slate-950" : "bg-slate-50";
+  const text = dark ? "text-slate-100" : "text-slate-900";
+  const cardBg = dark ? "bg-slate-900/70 border-slate-800" : "bg-white border-slate-200 shadow-sm";
+  const mutedText = dark ? "text-slate-400" : "text-slate-500";
+  const lastUpdated = dashboardData.meta.lastSync ? new Date(dashboardData.meta.lastSync) : null;
+
+  return (
+    <div className={"min-h-screen w-full " + bg + " " + text + " font-sans transition-colors"}>
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 flex flex-col gap-6">
+        <header className="flex flex-wrap items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            {logoUrl ? (
+              <img src={logoUrl} alt="Logo" className="h-10 w-auto max-w-[180px] object-contain rounded-md" />
+            ) : (
+              <div className="h-10 w-10 rounded-lg bg-blue-600 flex items-center justify-center shadow-lg shadow-blue-600/20">
+                <IconGauge className="h-5 w-5 text-white" />
+              </div>
+            )}
+            <div>
+              <h1 className="text-lg font-bold tracking-tight leading-none">Grupo Raviera</h1>
+              <p className={"text-xs " + mutedText}>Tráfego Pago &amp; Performance Digital</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 flex-wrap relative">
+            {role === "admin" && (
+              <div className={"flex items-center rounded-lg p-1 border " + (dark ? "bg-slate-900 border-slate-800" : "bg-white border-slate-200")}>
+                <button onClick={() => setView("dashboard")} className={"px-3 py-1.5 rounded-md text-xs font-semibold " + (view === "dashboard" ? "bg-blue-600 text-white" : mutedText)}>Dashboard</button>
+                <button onClick={() => setView("config")} className={"px-3 py-1.5 rounded-md text-xs font-semibold " + (view === "config" ? "bg-blue-600 text-white" : mutedText)}>Configuração</button>
+              </div>
+            )}
+            <button onClick={() => setDark(!dark)} className={"h-9 w-9 flex items-center justify-center rounded-lg border " + (dark ? "bg-slate-900 border-slate-800" : "bg-white border-slate-200")} aria-label="Alternar tema">
+              {dark ? <IconSun className="h-4 w-4" /> : <IconMoon className="h-4 w-4" />}
+            </button>
+            <button onClick={() => setSettingsOpen((v) => !v)} className={"h-9 w-9 flex items-center justify-center rounded-lg border " + (dark ? "bg-slate-900 border-slate-800" : "bg-white border-slate-200")} aria-label="Aparência">
+              <IconSettings className="h-4 w-4" />
+            </button>
+            <button onClick={onLogout} className={"h-9 w-9 flex items-center justify-center rounded-lg border " + (dark ? "bg-slate-900 border-slate-800" : "bg-white border-slate-200")} aria-label="Sair" title={email}>
+              <IconLogOut className="h-4 w-4" />
+            </button>
+            <SettingsPanel open={settingsOpen} onClose={() => setSettingsOpen(false)} dark={dark} setDark={setDark} logoUrl={logoUrl} setLogoUrl={setLogoUrl} />
+          </div>
+        </header>
+
+        {error && (
+          <div className={"rounded-lg border px-3 py-2 flex items-center gap-2 text-xs " + (dark ? "bg-red-500/5 border-red-500/20 text-red-400" : "bg-red-50 border-red-200 text-red-700")}>
+            <IconAlertCircle className="h-3.5 w-3.5 shrink-0" /> {error}
+          </div>
+        )}
+
+        {view === "config" ? (
+          <AdminPanel token={token} dark={dark} cardBg={cardBg} mutedText={mutedText} />
+        ) : (
+          <>
+            {dashboardData.meta.demoMode && (
+              <div className={"rounded-lg border px-3 py-2 flex items-center gap-2 text-xs " + (dark ? "bg-amber-500/5 border-amber-500/20 text-amber-400" : "bg-amber-50 border-amber-200 text-amber-700")}>
+                <IconRefresh className="h-3.5 w-3.5 shrink-0" />
+                Exibindo dados de demonstração (token do Meta não configurado no servidor).
+              </div>
+            )}
+
+            <div className={"rounded-xl border p-3 flex flex-wrap items-center gap-3 " + cardBg}>
+              <div className="flex items-center gap-1.5"><IconCalendar className={"h-4 w-4 " + mutedText} /><span className={"text-xs font-medium " + mutedText}>Período:</span></div>
+              <div className="flex flex-wrap gap-1">
+                {[{ id: "mesAtual", label: "Mês Atual" }, { id: "mesAnterior", label: "Mês Anterior" }, { id: "ultimos7", label: "Últimos 7 dias" }, { id: "custom", label: "Customizado" }].map((p) => (
+                  <button key={p.id} onClick={() => setPeriodo(p.id)} className={"px-3 py-1.5 rounded-md text-xs font-semibold transition-colors " + (periodo === p.id ? "bg-blue-600 text-white" : (dark ? "bg-slate-800 text-slate-300 hover:bg-slate-700" : "bg-slate-100 text-slate-600 hover:bg-slate-200"))}>{p.label}</button>
+                ))}
+              </div>
+              <span className={"text-xs " + mutedText}>
+                {range.start.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" })} – {range.end.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" })}
+              </span>
+              {periodo === "custom" && (
+                <div className="flex items-center gap-2">
+                  <input type="date" value={customStart} onChange={(e) => setCustomStart(e.target.value)} className={"px-2 py-1.5 rounded-md border text-xs " + (dark ? "bg-slate-800 border-slate-700 text-slate-100" : "bg-white border-slate-200")} />
+                  <span className={"text-xs " + mutedText}>até</span>
+                  <input type="date" value={customEnd} onChange={(e) => setCustomEnd(e.target.value)} className={"px-2 py-1.5 rounded-md border text-xs " + (dark ? "bg-slate-800 border-slate-700 text-slate-100" : "bg-white border-slate-200")} />
+                </div>
+              )}
+              <div className="flex items-center gap-3 ml-auto">
+                <div className="flex items-center gap-1.5 text-xs">
+                  <span className={mutedText}>{lastUpdated ? "Atualizado às " + lastUpdated.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" }) : ""}</span>
+                  <button onClick={refreshData} disabled={loading} aria-label="Atualizar dados"
+                    className={"h-7 w-7 flex items-center justify-center rounded-md border disabled:opacity-50 " + (dark ? "bg-slate-800 border-slate-700" : "bg-slate-100 border-slate-200")}>
+                    <IconRefresh className={"h-3.5 w-3.5 " + mutedText + (loading ? " animate-spin" : "")} />
+                  </button>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <IconBuilding className={"h-4 w-4 " + mutedText} />
+                  <div className="relative">
+                    <select value={marcaFiltro} onChange={(e) => setMarcaFiltro(e.target.value)} className={"appearance-none pl-3 pr-8 py-1.5 rounded-md border text-xs font-semibold cursor-pointer " + (dark ? "bg-slate-800 border-slate-700 text-slate-100" : "bg-white border-slate-200 text-slate-900")}>
+                      <option value="todas">Todas as Marcas</option>
+                      {brandsList.map((m) => <option key={m} value={m}>{m}</option>)}
+                    </select>
+                    <IconChevronDown className={"h-3.5 w-3.5 absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none " + mutedText} />
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <KpiCard IconComp={IconDollar} label="Investimento" value={fmtBRL(currentAgg.gasto)} badgeValue={variacao(currentAgg.gasto, previousAgg.gasto)} dark={dark} accent="#3b82f6" />
+              <KpiCard IconComp={IconUsers} label="Leads Gerados" value={fmtNum(currentAgg.quantidade)} badgeValue={variacao(currentAgg.quantidade, previousAgg.quantidade)} dark={dark} accent="#6366f1" />
+              <KpiCard IconComp={IconTarget} label="CPL Médio" value={fmtBRL(currentAgg.cpl)} badgeValue={variacao(currentAgg.cpl, previousAgg.cpl) !== null ? -variacao(currentAgg.cpl, previousAgg.cpl) : null} dark={dark} accent="#a855f7" />
+              <KpiCard IconComp={IconAlertCircle} label="Contas em Alerta de Saldo" value={fmtNum(contasEmRisco)} dark={dark} accent="#ef4444" />
+            </div>
+
+            {topCreativesToShow.length > 0 && (
+              <div className={"rounded-xl border p-4 " + cardBg}>
+                <h2 className="text-sm font-bold mb-1 flex items-center gap-1.5"><IconAward className="h-4 w-4 text-amber-500" /> Melhor Anúncio por Marca</h2>
+                <p className={"text-xs mb-3 " + mutedText}>Criativo com melhor performance de cada marca nos últimos 30 dias</p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {topCreativesToShow.map((item) => (
+                    <TopCreativeCard key={item.brandId} item={item} dark={dark} cardBg={cardBg} mutedText={mutedText} />
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className={"rounded-xl border p-4 " + cardBg}>
+              <h2 className="text-sm font-bold mb-1">Investimento Diário vs. Leads Gerados</h2>
+              <p className={"text-xs mb-3 " + mutedText}>Evolução no período selecionado</p>
+              <ChartLegend dark={dark} items={[
+                { shape: "line", color: "#3b82f6", label: "Investimento (R$) — área e linha" },
+                { shape: "line", color: "#f59e0b", label: "Leads gerados — linha tracejada e pontos", dashed: true },
+              ]} />
+              {loading ? <div className="h-[280px] flex items-center justify-center text-xs text-slate-500">Carregando dados...</div> : <EvolutionChart data={evolucaoDiaria} dark={dark} />}
+            </div>
+
+            {brandsToShow.length > 1 && (
+              <div className={"rounded-xl border p-4 " + cardBg}>
+                <h2 className="text-sm font-bold mb-1">Desempenho por Marca</h2>
+                <p className={"text-xs mb-3 " + mutedText}>Ranking de leads e investimento no período — passe o mouse para ver os valores</p>
+                <ChartLegend dark={dark} items={[
+                  { shape: "bar", color: "#3b82f6", label: "Leads gerados — barras" },
+                  { shape: "line", color: "#f59e0b", label: "Investimento (R$) — linha tracejada e pontos", dashed: true },
+                ]} />
+                <RankingChart data={rankingMarcas} dark={dark} />
+              </div>
+            )}
+
+            <div className={"rounded-xl border p-4 overflow-x-auto " + cardBg}>
+              <h2 className="text-sm font-bold mb-1">Saldo das Contas de Anúncios (Meta Ads)</h2>
+              <p className={"text-xs mb-4 " + mutedText}>Runway estimado: saldo atual ÷ diário esperado · Crítico ≤{RUNWAY_CRITICO}d · Atenção ≤{RUNWAY_ATENCAO}d</p>
+              <table className="w-full text-sm min-w-[680px]">
+                <thead><tr className={"text-left text-xs uppercase tracking-wide " + mutedText}>
+                  <SortableTh label="Marca" sortKey="marca" sortConfig={sortConfig} onSort={handleSort} />
+                  <SortableTh label="Investimento" sortKey="gasto" sortConfig={sortConfig} onSort={handleSort} />
+                  <SortableTh label="Leads" sortKey="quantidade" sortConfig={sortConfig} onSort={handleSort} />
+                  <SortableTh label="CPL" sortKey="cpl" sortConfig={sortConfig} onSort={handleSort} />
+                  <SortableTh label="Saldo Atual" sortKey="saldoAtual" sortConfig={sortConfig} onSort={handleSort} />
+                  <SortableTh label="Diário Esperado" sortKey="diarioEsperado" sortConfig={sortConfig} onSort={handleSort} />
+                  <SortableTh label="Runway" sortKey="diasRestantes" sortConfig={sortConfig} onSort={handleSort} />
+                  <SortableTh label="Status" sortKey="status" sortConfig={sortConfig} onSort={handleSort} />
+                </tr></thead>
+                <tbody className={"divide-y " + (dark ? "divide-slate-800" : "divide-slate-100")}>
+                  {linhasSaldoOrdenadas.map((row) => (
+                    <tr key={row.marca}>
+                      <td className="py-2.5 font-semibold">{row.marca}</td>
+                      <td className="py-2.5 tabular-nums">{fmtBRL(row.gasto)}</td>
+                      <td className="py-2.5 tabular-nums">{fmtNum(row.quantidade)}</td>
+                      <td className="py-2.5 tabular-nums">{fmtBRL(row.cpl)}</td>
+                      <td className="py-2.5 tabular-nums">{fmtBRL(row.saldoAtual)}</td>
+                      <td className="py-2.5 tabular-nums">{fmtBRL(row.diarioEsperado)}</td>
+                      <td className="py-2.5 tabular-nums">{row.diasRestantes !== null ? row.diasRestantes.toFixed(1) + "d" : "—"}</td>
+                      <td className="py-2.5"><StatusPill status={row.status} dark={dark} /></td>
+                    </tr>
+                  ))}
+                </tbody>
+                <tfoot>
+                  <tr className={"border-t font-semibold " + (dark ? "border-slate-800" : "border-slate-200")}>
+                    <td className="py-2.5">Total ({linhasSaldo.length})</td>
+                    <td className="py-2.5 tabular-nums">{fmtBRL(totalsSaldo.gasto)}</td>
+                    <td className="py-2.5 tabular-nums">{fmtNum(totalsSaldo.quantidade)}</td>
+                    <td className="py-2.5 tabular-nums">{fmtBRL(totalsSaldo.cpl)}</td>
+                    <td className="py-2.5 tabular-nums">{fmtBRL(totalsSaldo.saldoAtual)}</td>
+                    <td className="py-2.5 tabular-nums">{fmtBRL(totalsSaldo.diarioEsperado)}</td>
+                    <td className="py-2.5" colSpan="2">
+                      <span className={contasEmRisco > 0 ? (dark ? "text-amber-400" : "text-amber-700") : mutedText}>
+                        {contasEmRisco} conta{contasEmRisco === 1 ? "" : "s"} em risco
+                      </span>
+                    </td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+
+            <footer className={"text-center text-[11px] py-2 " + mutedText}>Grupo Raviera · Vendas e test-drives serão integrados em uma etapa futura (outro sistema)</footer>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ================================================================== */
+/* 9) APP (login gate)                                                  */
+/* ================================================================== */
+
+function App() {
+  const [session, setSession] = useState(() => {
+    const token = localStorage.getItem("raviera_token");
+    const role = localStorage.getItem("raviera_role");
+    const email = localStorage.getItem("raviera_email");
+    return token ? { token, role, email } : null;
+  });
+
+  function handleLogin(result) {
+    localStorage.setItem("raviera_token", result.access_token);
+    localStorage.setItem("raviera_role", result.role);
+    localStorage.setItem("raviera_email", result.email);
+    setSession({ token: result.access_token, role: result.role, email: result.email });
+  }
+  function handleLogout() {
+    localStorage.removeItem("raviera_token");
+    localStorage.removeItem("raviera_role");
+    localStorage.removeItem("raviera_email");
+    setSession(null);
+  }
+
+  if (!session) return <LoginScreen onLogin={handleLogin} />;
+  return <RavieraDashboard token={session.token} role={session.role} email={session.email} onLogout={handleLogout} />;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
