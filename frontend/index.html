@@ -478,6 +478,8 @@ function AdminPanel({ token, dark, cardBg, mutedText }) {
     }
   }
 
+  const brandsComFiltro = useMemo(() => brands.filter((b) => b.campaign_filter), [brands]);
+
   const [newAccount, setNewAccount] = useState({ meta_account_id: "", nome: "" });
   const [newBrand, setNewBrand] = useState({ nome: "", tier: "", ad_account_id: "", campaign_filter: "", diario_esperado_meta: 0 });
   const [newUser, setNewUser] = useState({ email: "", password: "", role: "gerente", brand_ids: [] });
@@ -515,6 +517,14 @@ function AdminPanel({ token, dark, cardBg, mutedText }) {
       <div className={"rounded-xl border p-4 " + cardBg}>
         <h2 className="text-sm font-bold mb-1">Marcas</h2>
         <p className={"text-xs mb-3 " + mutedText}>Se várias marcas dividem a mesma conta, use "Filtro de campanha" com o prefixo do nome das campanhas de cada marca no Meta.</p>
+        {brandsComFiltro.length > 0 && (
+          <div className={"rounded-lg border px-3 py-2 mb-3 text-xs " + (dark ? "bg-amber-500/5 border-amber-500/20 text-amber-400" : "bg-amber-50 border-amber-200 text-amber-700")}>
+            <p className="font-semibold mb-1">Atenção ao criar campanhas no Meta Ads Manager — o nome da campanha precisa começar com o prefixo certo, senão o sistema não sabe de qual marca é:</p>
+            <ul className="list-disc list-inside space-y-0.5">
+              {brandsComFiltro.map((b) => <li key={b.id}><strong>{b.nome}</strong>: começar com "{b.campaign_filter}"</li>)}
+            </ul>
+          </div>
+        )}
         <table className="w-full text-sm mb-3 min-w-[640px]">
           <thead><tr className={"text-left text-xs uppercase " + mutedText}>
             <th className="pb-2">Marca</th><th className="pb-2">Tier</th><th className="pb-2">Conta</th><th className="pb-2">Filtro campanha</th><th className="pb-2">Diário esperado</th><th className="pb-2"></th>
