@@ -1,0 +1,30 @@
+# Arquivo de serviço do systemd — mantém a aplicação rodando sempre, reiniciando sozinha
+# se cair ou se o servidor reiniciar.
+#
+# Instalação (como root):
+#   1. Copie este arquivo para /etc/systemd/system/dashboard-raviera.service
+#   2. Ajuste "User", "WorkingDirectory" e o caminho do "ExecStart" se o projeto estiver
+#      em outra pasta (o exemplo assume /opt/dashboard-mkt-raviera).
+#   3. Rode:
+#        systemctl daemon-reload
+#        systemctl enable dashboard-raviera
+#        systemctl start dashboard-raviera
+#   4. Ver status/logs:
+#        systemctl status dashboard-raviera
+#        journalctl -u dashboard-raviera -f
+
+[Unit]
+Description=Dashboard Raviera - API (FastAPI/Uvicorn)
+After=network.target
+
+[Service]
+Type=simple
+User=raviera
+WorkingDirectory=/opt/dashboard-mkt-raviera/backend
+Environment="PATH=/opt/dashboard-mkt-raviera/backend/.venv/bin"
+ExecStart=/opt/dashboard-mkt-raviera/backend/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -3,22 +3,43 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Grupo Raviera · Dashboard de Tráfego Pago</title>
+<title>Raviera Cockpit</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+<style>
+  @keyframes toastIn { from { transform: translateX(120%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+  @keyframes toastOut { from { transform: translateX(0); opacity: 1; } to { transform: translateX(120%); opacity: 0; } }
+  .toast-enter { animation: toastIn 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+  .toast-leave { animation: toastOut 0.25s ease-in forwards; }
+  @keyframes welcomeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes welcomeLine { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+  .welcome-in { animation: welcomeIn 0.45s cubic-bezier(0.16, 1, 0.3, 1) both; }
+  .welcome-line { animation: welcomeLine 0.5s cubic-bezier(0.65, 0, 0.35, 1) 0.15s both; transform-origin: center; }
+</style>
 </head>
 <body>
 <div id="root"></div>
 
 <script type="text/babel" data-presets="react">
 const { useState, useMemo, useEffect, useRef } = React;
+const APP_VERSION = "0.44";
 
 /* ================================================================== */
 /* 1) CLIENTE DA API (backend próprio, substitui o Apps Script)         */
 /* ================================================================== */
 
+function formatApiError(detail) {
+  if (!detail) return "";
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    return detail
+      .map((e) => (e && typeof e === "object" ? (e.loc ? e.loc[e.loc.length - 1] + ": " : "") + (e.msg || JSON.stringify(e)) : String(e)))
+      .join(" · ");
+  }
+  return JSON.stringify(detail);
+}
 function authFetch(path, token, options = {}) {
   return fetch(path, { ...options, headers: { ...(options.headers || {}), Authorization: "Bearer " + token } });
 }
@@ -29,7 +50,7 @@ async function authJson(path, token, options = {}) {
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.detail || "Falha na requisição (" + res.status + ")");
+    throw new Error(formatApiError(body.detail) || "Falha na requisição (" + res.status + ")");
   }
   if (res.status === 204) return null;
   return res.json();
@@ -52,12 +73,7 @@ const RUNWAY_ATENCAO = 7;
 
 function getPeriodRange(periodo, customStart, customEnd) {
   const today = new Date(); today.setHours(0, 0, 0, 0);
-  if (periodo === "ultimos7") {
-    const end = new Date(today); const start = new Date(today);
-    start.setDate(start.getDate() - 6);
-    return { start, end };
-  }
-  if (periodo === "mesAtual") return { start: new Date(today.getFullYear(), today.getMonth(), 1), end: today };
+  if (periodo === "mesAtual" || periodo === "comparativo") return { start: new Date(today.getFullYear(), today.getMonth(), 1), end: today };
   if (periodo === "mesAnterior") {
     return { start: new Date(today.getFullYear(), today.getMonth() - 1, 1), end: new Date(today.getFullYear(), today.getMonth(), 0) };
   }
@@ -72,8 +88,44 @@ function getPreviousRange({ start, end }) {
   const prevStart = new Date(prevEnd); prevStart.setDate(prevStart.getDate() - (lengthDays - 1));
   return { start: prevStart, end: prevEnd };
 }
+// Comparativo: mês atual (dia 1 até hoje) contra o mesmo recorte de dias no mês anterior ou
+// no mesmo mês do ano passado — evita comparar mês parcial com mês inteiro.
+function getComparativoRange(range, tipo) {
+  const monthsBack = tipo === "anoAnterior" ? 12 : 1;
+  const refYear = range.start.getFullYear();
+  const refMonth = range.start.getMonth() - monthsBack;
+  const prevStart = new Date(refYear, refMonth, 1);
+  const daysInPrevMonth = new Date(refYear, refMonth + 1, 0).getDate();
+  const prevEnd = new Date(refYear, refMonth, Math.min(range.end.getDate(), daysInPrevMonth));
+  return { start: prevStart, end: prevEnd };
+}
+// r.data vem do backend como "AAAA-MM-DD" (sem hora). new Date("AAAA-MM-DD") interpreta isso
+// como meia-noite UTC, mas os limites do range (range.start/end) são meia-noite LOCAL — em
+// fusos negativos (Brasil) isso empurrava cada registro pro dia anterior e sumia com o dia 1
+// de cada mês nos filtros de "Mês Atual". Por isso datas sem hora sempre são interpretadas
+// como hora local aqui, nunca via new Date(string) direto.
+function parseDateLocal(dateStr) {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  return new Date(y, m - 1, d);
+}
+function fmtDateOnly(dateStr) {
+  return parseDateLocal(dateStr).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" });
+}
+// dashboardData.meta.lastSync vem com "Z" (horário UTC de verdade, ver backend) quando é um
+// horário de sincronização real — nesse caso o navegador já converte certinho pro horário
+// local de quem estiver olhando. Quando vem só "AAAA-MM-DD" (funil, sem hora de sincronização
+// própria) mostramos só a data, sem hora nenhuma pra não inventar um horário sem sentido.
+function fmtAtualizado(lastSync) {
+  if (!lastSync) return "";
+  if (lastSync.includes("T")) {
+    const d = new Date(lastSync);
+    return "Atualizado em " + d.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric" }) +
+      " às " + d.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+  }
+  return "Atualizado em " + parseDateLocal(lastSync).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric" });
+}
 function filterByRange(records, range) {
-  return records.filter((r) => { const d = new Date(r.data); return d >= range.start && d <= range.end; });
+  return records.filter((r) => { const d = parseDateLocal(r.data); return d >= range.start && d <= range.end; });
 }
 function aggregateTrafego(records) {
   const base = records.reduce((acc, r) => { acc.gasto += r.gasto; acc.quantidade += r.quantidade; return acc; }, { gasto: 0, quantidade: 0 });
@@ -128,6 +180,10 @@ const IconLock = (p) => <Icon {...p} path={<><rect x="3" y="11" width="18" heigh
 const IconLogOut = (p) => <Icon {...p} path={<><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4" /><polyline points="16 17 21 12 16 7" /><line x1="21" y1="12" x2="9" y2="12" /></>} />;
 const IconAward = (p) => <Icon {...p} path={<><circle cx="12" cy="8" r="6" /><path d="M8.21 13.89L7 23l5-3 5 3-1.21-9.12" /></>} />;
 const IconTrash = (p) => <Icon {...p} path={<><polyline points="3 6 5 6 21 6" /><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6" /><path d="M10 11v6" /><path d="M14 11v6" /><path d="M9 6V4a2 2 0 012-2h2a2 2 0 012 2v2" /></>} />;
+const IconInstagram = (p) => <Icon {...p} path={<><rect x="2" y="2" width="20" height="20" rx="5" ry="5" /><path d="M16 11.37A4 4 0 1112.63 8 4 4 0 0116 11.37z" /><line x1="17.5" y1="6.5" x2="17.51" y2="6.5" /></>} />;
+const IconHeart = (p) => <Icon {...p} path={<path d="M20.84 4.61a5.5 5.5 0 00-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 00-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 000-7.78z" />} />;
+const IconSparkle = (p) => <Icon {...p} path={<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3z" />} />;
+const IconSend = (p) => <Icon {...p} path={<><line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" /></>} />;
 
 /* ================================================================== */
 /* 4) GRÁFICOS EM SVG NATIVO COM TOOLTIP INTERATIVO                     */
@@ -160,7 +216,7 @@ function Tooltip({ hover, dark }) {
   return (
     <div
       className={"absolute z-10 pointer-events-none rounded-lg border px-2.5 py-1.5 text-[11px] shadow-lg whitespace-nowrap " +
-        (dark ? "bg-slate-800 border-slate-700 text-slate-100" : "bg-white border-slate-200 text-slate-900")}
+        (dark ? "bg-neutral-800 border-neutral-700 text-neutral-100" : "bg-white border-neutral-200 text-neutral-900")}
       style={{ left: hover.xPct + "%", top: hover.yPct + "%", transform: "translate(-50%, -125%)" }}
     >
       {hover.lines.map((l, i) => <div key={i} className={i === 0 ? "font-semibold" : ""}>{l}</div>)}
@@ -180,7 +236,7 @@ function ChartLegend({ items, dark }) {
               <line x1="0" y1="4" x2="16" y2="4" stroke={it.color} strokeWidth="2" strokeDasharray={it.dashed ? "4 3" : undefined} />
             </svg>
           )}
-          <span className={dark ? "text-slate-400" : "text-slate-500"}>{it.label}</span>
+          <span className={dark ? "text-neutral-400" : "text-neutral-500"}>{it.label}</span>
         </div>
       ))}
     </div>
@@ -191,7 +247,7 @@ function EvolutionChart({ data, dark }) {
   const containerRef = useRef(null);
   const CHART_W = useElementWidth(containerRef, 760);
   const [hover, setHover] = useState(null);
-  if (!data.length) return <div ref={containerRef} className="h-[280px] flex items-center justify-center text-xs text-slate-500">Sem dados no período.</div>;
+  if (!data.length) return <div ref={containerRef} className="h-[280px] flex items-center justify-center text-xs text-neutral-500">Sem dados no período.</div>;
   const innerW = CHART_W - PAD.left - PAD.right;
   const innerH = CHART_H - PAD.top - PAD.bottom;
   const gastoMax = Math.max(...data.map((d) => d.gasto)) * 1.15 || 1;
@@ -236,7 +292,7 @@ function RankingChart({ data, dark }) {
   const containerRef = useRef(null);
   const CHART_W = useElementWidth(containerRef, 760);
   const [hover, setHover] = useState(null);
-  if (!data.length) return <div ref={containerRef} className="h-[280px] flex items-center justify-center text-xs text-slate-500">Sem dados.</div>;
+  if (!data.length) return <div ref={containerRef} className="h-[280px] flex items-center justify-center text-xs text-neutral-500">Sem dados.</div>;
   const maxLabelLen = Math.max(...data.map((d) => d.marca.length));
   const pad = { ...PAD, bottom: Math.min(170, Math.max(80, maxLabelLen * 5.4 + 30)) };
   const chartH = 280 - PAD.bottom + pad.bottom;
@@ -292,18 +348,84 @@ function Badge({ value, dark }) {
     </span>
   );
 }
-function KpiCard({ IconComp, label, value, badgeValue, dark, accent }) {
+// Arco desenhado ponto a ponto (em vez de large-arc/sweep-flag do SVG) — mais fácil de
+// acertar a direção certa em qualquer sentido, positivo ou negativo.
+function _arcoPath(cx, cy, r, anguloInicial, anguloFinal, passos = 32) {
+  let d = "";
+  for (let i = 0; i <= passos; i++) {
+    const a = anguloInicial + (anguloFinal - anguloInicial) * (i / passos);
+    const x = cx + r * Math.sin(a);
+    const y = cy - r * Math.cos(a);
+    d += (i === 0 ? "M" : "L") + x.toFixed(2) + " " + y.toFixed(2) + " ";
+  }
+  return d;
+}
+function Gauge({ value, dark }) {
+  const w = 132, h = 78, cx = w / 2, cy = h - 4, r = 54;
+  const temValor = value !== null && value !== undefined && isFinite(value);
+  const clamped = temValor ? Math.max(-100, Math.min(100, value)) : 0;
+  const angulo = (clamped / 100) * (Math.PI / 2); // -90°..+90°, 0 = topo
+  const positive = clamped >= 0;
+  const cor = !temValor ? (dark ? "#52525b" : "#a3a3a3") : positive ? "#10b981" : "#ef4444";
+  const trilhoPath = _arcoPath(cx, cy, r, -Math.PI / 2, Math.PI / 2);
+  const progressoPath = _arcoPath(cx, cy, r, 0, angulo);
+  const ponteiro = { x: cx + (r - 8) * Math.sin(angulo), y: cy - (r - 8) * Math.cos(angulo) };
   return (
-    <div className={"rounded-xl border p-4 flex flex-col gap-3 " + (dark ? "bg-slate-900/70 border-slate-800" : "bg-white border-slate-200 shadow-sm")}>
+    <svg viewBox={`0 0 ${w} ${h}`} width="100%" height={h} className="block">
+      <path d={trilhoPath} fill="none" stroke={dark ? "#27272a" : "#e5e5e5"} strokeWidth="9" strokeLinecap="round" />
+      {temValor && <path d={progressoPath} fill="none" stroke={cor} strokeWidth="9" strokeLinecap="round" />}
+      <line x1={cx} y1={cy} x2={ponteiro.x} y2={ponteiro.y} stroke={dark ? "#d4d4d4" : "#525252"} strokeWidth="2.5" strokeLinecap="round" />
+      <circle cx={cx} cy={cy} r="4" fill={dark ? "#d4d4d4" : "#525252"} />
+    </svg>
+  );
+}
+function KpiCard({ IconComp, label, value, badgeValue, previousValue, previousLabel, dark, accent, gauge, menorMelhor }) {
+  if (gauge) {
+    const temValor = badgeValue !== null && badgeValue !== undefined && isFinite(badgeValue);
+    // badgeValue é sempre a variação REAL do número (ex.: CPL subiu 20% → +20%, mostrado
+    // assim mesmo). Mas pra métricas onde menor é melhor (ex.: CPL), quem sobe é ruim — por
+    // isso a cor/ponteiro do velocímetro usam o valor invertido só pra essa decisão, sem
+    // mexer no texto da porcentagem exibida.
+    const valorParaCor = menorMelhor ? -badgeValue : badgeValue;
+    const positive = temValor && valorParaCor >= 0;
+    const corPct = !temValor ? (dark ? "text-neutral-500" : "text-neutral-400") : positive ? (dark ? "text-emerald-400" : "text-emerald-600") : (dark ? "text-red-400" : "text-red-600");
+    return (
+      <div className={"rounded-xl border p-4 flex flex-col items-center gap-1 " + (dark ? "bg-neutral-900/70 border-neutral-800" : "bg-white border-neutral-200 shadow-sm")}>
+        <div className="w-full flex items-center justify-between">
+          <div className={"h-8 w-8 rounded-lg flex items-center justify-center shrink-0 " + (dark ? "bg-neutral-800" : "bg-neutral-100")} style={{ color: accent }}>
+            <IconComp className="h-4 w-4" />
+          </div>
+          <p className={"text-[11px] font-medium uppercase tracking-wide text-right " + (dark ? "text-neutral-500" : "text-neutral-500")}>{label}</p>
+        </div>
+        <Gauge value={temValor ? valorParaCor : null} dark={dark} />
+        <p className={"text-sm font-bold tabular-nums -mt-1 " + corPct}>
+          {temValor ? (badgeValue >= 0 ? "+" : "-") + Math.abs(badgeValue).toFixed(1).replace(".", ",") + "%" : "—"}
+        </p>
+        <p className={"text-xl font-bold tabular-nums tracking-tight " + (dark ? "text-neutral-50" : "text-neutral-900")}>{value}</p>
+        {previousValue !== undefined && (
+          <div className={"inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-semibold tabular-nums " + (dark ? "bg-neutral-800 text-neutral-200" : "bg-neutral-100 text-neutral-700")}>
+            <span className={dark ? "text-neutral-500" : "text-neutral-400"}>{previousLabel}:</span> {previousValue}
+          </div>
+        )}
+      </div>
+    );
+  }
+  return (
+    <div className={"rounded-xl border p-4 flex flex-col gap-3 " + (dark ? "bg-neutral-900/70 border-neutral-800" : "bg-white border-neutral-200 shadow-sm")}>
       <div className="flex items-center justify-between">
-        <div className={"h-9 w-9 rounded-lg flex items-center justify-center " + (dark ? "bg-slate-800" : "bg-slate-100")} style={{ color: accent }}>
+        <div className={"h-9 w-9 rounded-lg flex items-center justify-center " + (dark ? "bg-neutral-800" : "bg-neutral-100")} style={{ color: accent }}>
           <IconComp className="h-5 w-5" />
         </div>
         <Badge value={badgeValue} dark={dark} />
       </div>
       <div>
-        <p className={"text-[11px] font-medium uppercase tracking-wide " + (dark ? "text-slate-500" : "text-slate-500")}>{label}</p>
-        <p className={"text-xl font-bold tabular-nums tracking-tight " + (dark ? "text-slate-50" : "text-slate-900")}>{value}</p>
+        <p className={"text-[11px] font-medium uppercase tracking-wide " + (dark ? "text-neutral-500" : "text-neutral-500")}>{label}</p>
+        <p className={"text-xl font-bold tabular-nums tracking-tight " + (dark ? "text-neutral-50" : "text-neutral-900")}>{value}</p>
+        {previousValue !== undefined && (
+          <div className={"inline-flex items-center gap-1 mt-2 rounded-md px-2 py-1 text-xs font-semibold tabular-nums " + (dark ? "bg-neutral-800 text-neutral-200" : "bg-neutral-100 text-neutral-700")}>
+            <span className={dark ? "text-neutral-500" : "text-neutral-400"}>{previousLabel}:</span> {previousValue}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -313,7 +435,7 @@ function StatusPill({ status, dark }) {
     ok: { label: "Saldo OK", cls: dark ? "bg-emerald-500/10 text-emerald-400" : "bg-emerald-50 text-emerald-700", IconComp: IconCheck },
     atencao: { label: "Atenção", cls: dark ? "bg-amber-500/10 text-amber-400" : "bg-amber-50 text-amber-700", IconComp: IconAlertTriangle },
     critico: { label: "Crítico", cls: dark ? "bg-red-500/10 text-red-400" : "bg-red-50 text-red-700", IconComp: IconXCircle },
-    semDados: { label: "Sem dados", cls: dark ? "bg-slate-500/10 text-slate-400" : "bg-slate-100 text-slate-500", IconComp: IconAlertCircle },
+    semDados: { label: "Sem dados", cls: dark ? "bg-neutral-500/10 text-neutral-400" : "bg-neutral-100 text-neutral-500", IconComp: IconAlertCircle },
   };
   const { label, cls, IconComp } = map[status];
   return <span className={"inline-flex items-center gap-1 rounded-full px-2 py-1 text-xs font-semibold " + cls}><IconComp className="h-3.5 w-3.5" /> {label}</span>;
@@ -329,62 +451,254 @@ function SortableTh({ label, sortKey, sortConfig, onSort }) {
     </th>
   );
 }
-function SettingsPanel({ open, onClose, dark, setDark, logoUrl, setLogoUrl }) {
-  const fileRef = useRef(null);
+function SettingsPanel({ open, onClose, dark, setDark, role, view, setView }) {
   if (!open) return null;
-  function handleFile(e) {
-    const file = e.target.files && e.target.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => { setLogoUrl(reader.result); };
-    reader.readAsDataURL(file);
-  }
   return (
-    <div className={"absolute right-0 top-12 z-20 w-72 rounded-xl border p-4 shadow-xl " + (dark ? "bg-slate-900 border-slate-800" : "bg-white border-slate-200")}>
+    <div className={"absolute right-0 top-12 z-20 w-72 rounded-xl border p-4 shadow-xl " + (dark ? "bg-neutral-900 border-neutral-800" : "bg-white border-neutral-200")}>
       <div className="flex items-center justify-between mb-3">
-        <h3 className="text-sm font-bold">Aparência</h3>
-        <button onClick={onClose} className={dark ? "text-slate-400" : "text-slate-500"}><IconX className="h-4 w-4" /></button>
+        <h3 className="text-sm font-bold">Configurações</h3>
+        <button onClick={onClose} className={dark ? "text-neutral-400" : "text-neutral-500"}><IconX className="h-4 w-4" /></button>
       </div>
       <div className="flex flex-col gap-4">
         <div>
-          <p className={"text-xs font-medium mb-2 " + (dark ? "text-slate-400" : "text-slate-500")}>Logo da empresa</p>
-          <div className="flex items-center gap-2">
-            <button onClick={() => fileRef.current && fileRef.current.click()}
-              className={"flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold border " + (dark ? "bg-slate-800 border-slate-700 text-slate-200" : "bg-slate-100 border-slate-200 text-slate-700")}>
-              <IconImage className="h-3.5 w-3.5" /> Alterar logo
+          <p className={"text-xs font-medium mb-2 " + (dark ? "text-neutral-400" : "text-neutral-500")}>Tema</p>
+          <div className={"flex items-center rounded-lg p-1 border " + (dark ? "bg-neutral-800 border-neutral-700" : "bg-neutral-100 border-neutral-200")}>
+            <button onClick={() => setDark(false)} className={"flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold " + (!dark ? "bg-white text-neutral-900 shadow" : (dark ? "text-neutral-400" : "text-neutral-500"))}><IconSun className="h-3.5 w-3.5" /> Claro</button>
+            <button onClick={() => setDark(true)} className={"flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold " + (dark ? "bg-blue-600 text-white" : "text-neutral-500")}><IconMoon className="h-3.5 w-3.5" /> Escuro</button>
+          </div>
+        </div>
+        {role === "admin" && (
+          <div>
+            <p className={"text-xs font-medium mb-2 " + (dark ? "text-neutral-400" : "text-neutral-500")}>Administração</p>
+            <button onClick={() => { setView("config"); onClose(); }}
+              className={"w-full flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold border " +
+                (view === "config" ? "bg-blue-600 text-white border-blue-600" : (dark ? "bg-neutral-800 border-neutral-700 text-neutral-200" : "bg-neutral-100 border-neutral-200 text-neutral-700"))}>
+              <IconSettings className="h-3.5 w-3.5" /> Configuração
             </button>
-            {logoUrl && (
-              <button onClick={() => setLogoUrl(null)} className={"text-xs font-semibold " + (dark ? "text-red-400" : "text-red-600")}>Remover</button>
-            )}
           </div>
-          <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={handleFile} />
-        </div>
-        <div>
-          <p className={"text-xs font-medium mb-2 " + (dark ? "text-slate-400" : "text-slate-500")}>Tema</p>
-          <div className={"flex items-center rounded-lg p-1 border " + (dark ? "bg-slate-800 border-slate-700" : "bg-slate-100 border-slate-200")}>
-            <button onClick={() => setDark(false)} className={"flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold " + (!dark ? "bg-white text-slate-900 shadow" : (dark ? "text-slate-400" : "text-slate-500"))}><IconSun className="h-3.5 w-3.5" /> Claro</button>
-            <button onClick={() => setDark(true)} className={"flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold " + (dark ? "bg-blue-600 text-white" : "text-slate-500")}><IconMoon className="h-3.5 w-3.5" /> Escuro</button>
-          </div>
-        </div>
+        )}
       </div>
     </div>
   );
 }
-function TopCreativeCard({ item, dark, cardBg, mutedText }) {
+const RANK_MEDAL = { 1: "🥇", 2: "🥈", 3: "🥉" };
+
+function CreativeCard({ criativo, dark, cardBg, mutedText, onClick }) {
   return (
-    <div className={"rounded-xl border p-3 flex gap-3 items-center " + cardBg}>
-      <div className={"h-14 w-14 shrink-0 rounded-lg overflow-hidden flex items-center justify-center " + (dark ? "bg-slate-800" : "bg-slate-100")}>
-        {item.thumbnailUrl ? (
-          <img src={item.thumbnailUrl} alt="Criativo" className="h-full w-full object-cover" />
+    <div onClick={onClick}
+      className={"rounded-xl border p-3 flex gap-3 items-center cursor-pointer transition-transform hover:scale-[1.02] " + cardBg}>
+      <div className={"h-14 w-14 shrink-0 rounded-lg overflow-hidden flex items-center justify-center relative " + (dark ? "bg-neutral-800" : "bg-neutral-100")}>
+        {criativo.thumbnailUrl ? (
+          <img src={criativo.thumbnailUrl} alt="Criativo" className="h-full w-full object-cover" />
         ) : (
           <IconImage className={"h-5 w-5 " + mutedText} />
         )}
+        <span className="absolute -top-1.5 -left-1.5 text-sm leading-none drop-shadow">{RANK_MEDAL[criativo.rank] || criativo.rank}</span>
       </div>
-      <div className="min-w-0">
-        <p className={"text-[11px] font-medium uppercase tracking-wide truncate " + mutedText}>{item.marca}</p>
-        <p className="text-sm font-semibold truncate">{item.nomeAnuncio || "—"}</p>
-        <p className={"text-xs " + mutedText}>{item.metricaLabel}</p>
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-semibold truncate">{criativo.nomeAnuncio || "—"}</p>
+        <p className={"text-xs " + mutedText}>
+          Investido {fmtBRL(criativo.gasto)} · {fmtNum(criativo.leads)} leads · CPL {fmtBRL(criativo.custoPorLead)}
+        </p>
       </div>
+    </div>
+  );
+}
+
+function TopCreativesBrandGroup({ item, dark, cardBg, mutedText, onSelectCreative }) {
+  return (
+    <div className="flex flex-col gap-2">
+      <p className={"text-[11px] font-semibold uppercase tracking-wide " + mutedText}>{item.marca}</p>
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+        {item.criativos.map((c) => (
+          <CreativeCard key={c.rank} criativo={c} dark={dark} cardBg={cardBg} mutedText={mutedText}
+            onClick={() => onSelectCreative({ ...c, marca: item.marca })} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function CreativeDetailModal({ creative, onClose, dark }) {
+  if (!creative) return null;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4" onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()}
+        className={"w-full max-w-lg max-h-[90vh] overflow-y-auto rounded-xl border p-5 flex flex-col gap-4 shadow-xl " + (dark ? "bg-neutral-900 border-neutral-800" : "bg-white border-neutral-200")}>
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <p className={"text-[11px] font-semibold uppercase tracking-wide " + (dark ? "text-neutral-400" : "text-neutral-500")}>{creative.marca}</p>
+            <p className="text-sm font-bold leading-snug">{creative.nomeAnuncio || "—"}</p>
+          </div>
+          <button onClick={onClose} className={(dark ? "text-neutral-400" : "text-neutral-500") + " shrink-0"}><IconX className="h-4 w-4" /></button>
+        </div>
+        <div className={"w-full rounded-lg overflow-hidden relative flex items-center justify-center " + (dark ? "bg-neutral-800" : "bg-neutral-100")}>
+          {creative.thumbnailUrl ? (
+            <img src={creative.thumbnailUrl} alt="Criativo" className="w-full h-auto max-h-[65vh] object-contain" />
+          ) : (
+            <div className="h-40 w-full flex items-center justify-center">
+              <IconImage className={"h-8 w-8 " + (dark ? "text-neutral-500" : "text-neutral-400")} />
+            </div>
+          )}
+          <span className="absolute top-2 left-2 text-2xl leading-none drop-shadow">{RANK_MEDAL[creative.rank] || creative.rank}</span>
+        </div>
+        <div className="grid grid-cols-3 gap-2 text-center">
+          <div>
+            <p className={"text-[10px] uppercase tracking-wide font-medium " + (dark ? "text-neutral-500" : "text-neutral-500")}>Investido</p>
+            <p className="text-sm font-bold tabular-nums">{fmtBRL(creative.gasto)}</p>
+          </div>
+          <div>
+            <p className={"text-[10px] uppercase tracking-wide font-medium " + (dark ? "text-neutral-500" : "text-neutral-500")}>Leads</p>
+            <p className="text-sm font-bold tabular-nums">{fmtNum(creative.leads)}</p>
+          </div>
+          <div>
+            <p className={"text-[10px] uppercase tracking-wide font-medium " + (dark ? "text-neutral-500" : "text-neutral-500")}>CPL</p>
+            <p className="text-sm font-bold tabular-nums">{fmtBRL(creative.custoPorLead)}</p>
+          </div>
+        </div>
+        {creative.atualizadoEm && (
+          <p className={"text-[11px] text-center " + (dark ? "text-neutral-500" : "text-neutral-400")}>
+            Dados até {parseDateLocal(creative.atualizadoEm).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric" })}
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function NewsItemRow({ item, dark, mutedText }) {
+  return (
+    <a href={item.link} target="_blank" rel="noopener noreferrer"
+      className={"flex gap-2.5 items-center rounded-lg px-3 py-2 -mx-3 transition-all duration-200 hover:scale-[1.03] hover:shadow-md hover:z-10 relative " + (dark ? "hover:bg-neutral-800" : "hover:bg-neutral-50")}>
+      <div className={"h-12 w-12 shrink-0 rounded-lg overflow-hidden flex items-center justify-center " + (dark ? "bg-neutral-800" : "bg-neutral-100")}>
+        {item.thumbnailUrl ? <img src={item.thumbnailUrl} alt="" className="h-full w-full object-cover" /> : <IconImage className={"h-4 w-4 " + mutedText} />}
+      </div>
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-medium leading-snug">{item.titulo}</p>
+        <p className={"text-[11px] mt-0.5 " + mutedText}>
+          {item.fonte}{item.publicadoEm ? " · " + fmtDateShort(item.publicadoEm) : ""}
+        </p>
+      </div>
+    </a>
+  );
+}
+function NewsBrandGroup({ item, dark, mutedText }) {
+  return (
+    <div className="flex flex-col gap-1">
+      <p className={"text-[11px] font-semibold uppercase tracking-wide mb-1 " + mutedText}>{item.marca}</p>
+      <div className="flex flex-col divide-y divide-transparent">
+        {item.itens.map((n, i) => (
+          <NewsItemRow key={i} item={n} dark={dark} mutedText={mutedText} />
+        ))}
+      </div>
+    </div>
+  );
+}
+function NewsCarousel({ itens, dark, mutedText }) {
+  const scrollRef = useRef(null);
+  const [activeIndex, setActiveIndex] = useState(0);
+
+  function handleScroll() {
+    const el = scrollRef.current;
+    if (!el) return;
+    const center = el.scrollLeft + el.clientWidth / 2;
+    let closest = 0, closestDist = Infinity;
+    Array.from(el.children).forEach((child, i) => {
+      const childCenter = child.offsetLeft + child.offsetWidth / 2;
+      const dist = Math.abs(center - childCenter);
+      if (dist < closestDist) { closestDist = dist; closest = i; }
+    });
+    setActiveIndex(closest);
+  }
+  useEffect(() => { const t = setTimeout(handleScroll, 50); return () => clearTimeout(t); }, [itens]);
+
+  function scrollToIndex(i) {
+    const el = scrollRef.current;
+    const child = el && el.children[i];
+    if (!el || !child) return;
+    el.scrollTo({ left: child.offsetLeft - (el.clientWidth - child.offsetWidth) / 2, behavior: "smooth" });
+  }
+
+  if (!itens.length) return null;
+  return (
+    <div className="relative">
+      <div ref={scrollRef} onScroll={handleScroll}
+        className="flex gap-4 overflow-x-auto pb-2 px-[16%] snap-x snap-mandatory scroll-smooth [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+        {itens.map((n, i) => (
+          <a key={i} href={n.link} target="_blank" rel="noopener noreferrer"
+            className={"shrink-0 w-64 sm:w-72 snap-center rounded-xl border overflow-hidden transition-all duration-300 hover:scale-105 hover:opacity-100 hover:shadow-lg hover:z-10 relative " +
+              (dark ? "bg-neutral-900 border-neutral-800" : "bg-white border-neutral-200 shadow-sm") + " " +
+              (i === activeIndex ? "scale-100 opacity-100" : "scale-90 opacity-40")}>
+            <div className={"h-36 w-full " + (dark ? "bg-neutral-800" : "bg-neutral-100")}>
+              {n.thumbnailUrl ? <img src={n.thumbnailUrl} alt="" className="h-full w-full object-cover" /> : (
+                <div className="h-full w-full flex items-center justify-center"><IconImage className={"h-6 w-6 " + mutedText} /></div>
+              )}
+            </div>
+            <div className="p-3">
+              <p className="text-sm font-semibold leading-snug line-clamp-3">{n.titulo}</p>
+              <p className={"text-[11px] mt-1 " + mutedText}>{n.fonte}{n.publicadoEm ? " · " + fmtDateShort(n.publicadoEm) : ""}</p>
+            </div>
+          </a>
+        ))}
+      </div>
+      {itens.length > 1 && (
+        <>
+          <button onClick={() => scrollToIndex(Math.max(0, activeIndex - 1))} aria-label="Anterior"
+            className={"absolute left-0 top-1/2 -translate-y-1/2 h-8 w-8 rounded-full flex items-center justify-center border z-10 " + (dark ? "bg-neutral-900 border-neutral-700" : "bg-white border-neutral-200 shadow")}>
+            <IconChevronDown className="h-4 w-4 rotate-90" />
+          </button>
+          <button onClick={() => scrollToIndex(Math.min(itens.length - 1, activeIndex + 1))} aria-label="Próxima"
+            className={"absolute right-0 top-1/2 -translate-y-1/2 h-8 w-8 rounded-full flex items-center justify-center border z-10 " + (dark ? "bg-neutral-900 border-neutral-700" : "bg-white border-neutral-200 shadow")}>
+            <IconChevronDown className="h-4 w-4 -rotate-90" />
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
+function OrganicAccountCard({ item, dark, cardBg, mutedText }) {
+  const post = item.topPost;
+  const ganho = item.seguidoresGanhosPeriodo || 0;
+  const ganhoPositivo = ganho >= 0;
+  return (
+    <div className={"rounded-xl border p-4 flex flex-col gap-3 " + cardBg}>
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <p className="text-sm font-semibold truncate">@{item.username}</p>
+          <p className={"text-[11px] truncate " + mutedText}>{item.marcas.join(" · ")}</p>
+        </div>
+        <div className="text-right shrink-0">
+          <p className="text-lg font-bold tabular-nums leading-tight">{fmtNum(item.seguidoresAtual)}</p>
+          <p className={"text-[10px] uppercase tracking-wide font-medium " + mutedText}>seguidores</p>
+        </div>
+      </div>
+
+      <div className={"inline-flex items-center gap-1 self-start rounded-full px-2 py-0.5 text-[11px] font-semibold " +
+        (ganhoPositivo ? (dark ? "bg-emerald-500/10 text-emerald-400" : "bg-emerald-50 text-emerald-600") : (dark ? "bg-red-500/10 text-red-400" : "bg-red-50 text-red-600"))}>
+        {ganhoPositivo ? <IconArrowUp className="h-3 w-3" /> : <IconArrowDown className="h-3 w-3" />}
+        {fmtNum(Math.abs(ganho))} seguidores no período
+      </div>
+
+      {post ? (
+        <div className="flex gap-3 items-center">
+          <div className={"h-16 w-16 shrink-0 rounded-lg overflow-hidden flex items-center justify-center " + (dark ? "bg-neutral-800" : "bg-neutral-100")}>
+            {post.thumbnailUrl ? (
+              <img src={post.thumbnailUrl} alt="Post" className="h-full w-full object-cover" />
+            ) : (
+              <IconImage className={"h-5 w-5 " + mutedText} />
+            )}
+          </div>
+          <div className="min-w-0 flex-1">
+            <p className="text-xs font-medium truncate">{post.legenda || "Post em destaque"}</p>
+            <p className={"text-xs flex items-center gap-1 " + mutedText}>
+              <IconHeart className="h-3 w-3" /> {fmtNum(post.curtidas)} · {fmtNum(post.comentarios)} comentários
+            </p>
+          </div>
+        </div>
+      ) : (
+        <p className={"text-xs " + mutedText}>Sem posts sincronizados ainda.</p>
+      )}
     </div>
   );
 }
@@ -414,27 +728,25 @@ function LoginScreen({ onLogin }) {
   }
 
   return (
-    <div className="min-h-screen w-full bg-slate-950 text-slate-100 flex items-center justify-center px-4">
-      <form onSubmit={handleSubmit} className="w-full max-w-sm bg-slate-900/70 border border-slate-800 rounded-xl p-6 flex flex-col gap-4">
+    <div className="min-h-screen w-full bg-neutral-950 text-neutral-100 flex items-center justify-center px-4">
+      <form onSubmit={handleSubmit} className="w-full max-w-sm bg-neutral-900/70 border border-neutral-800 rounded-xl p-6 flex flex-col gap-4">
         <div className="flex items-center gap-3 mb-2">
-          <div className="h-10 w-10 rounded-lg bg-blue-600 flex items-center justify-center shadow-lg shadow-blue-600/20">
-            <IconGauge className="h-5 w-5 text-white" />
-          </div>
+          <img src="/static/assets/logo-escuro.png" alt="Grupo Raviera" className="h-10 w-auto object-contain" />
           <div>
-            <h1 className="text-lg font-bold leading-none">Grupo Raviera</h1>
-            <p className="text-xs text-slate-400">Dashboard de Tráfego Pago</p>
+            <h1 className="text-lg font-bold leading-none">Raviera Cockpit</h1>
+            <p className="text-xs text-neutral-400">No controle de cada decisão.</p>
           </div>
         </div>
         {error && <div className="text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-md px-3 py-2">{error}</div>}
         <div className="flex flex-col gap-1">
-          <label className="text-xs font-medium text-slate-400">E-mail</label>
+          <label className="text-xs font-medium text-neutral-400">E-mail</label>
           <input type="email" required value={email} onChange={(e) => setEmail(e.target.value)}
-            className="px-3 py-2 rounded-md bg-slate-800 border border-slate-700 text-sm" />
+            className="px-3 py-2 rounded-md bg-neutral-800 border border-neutral-700 text-sm" />
         </div>
         <div className="flex flex-col gap-1">
-          <label className="text-xs font-medium text-slate-400">Senha</label>
+          <label className="text-xs font-medium text-neutral-400">Senha</label>
           <input type="password" required value={password} onChange={(e) => setPassword(e.target.value)}
-            className="px-3 py-2 rounded-md bg-slate-800 border border-slate-700 text-sm" />
+            className="px-3 py-2 rounded-md bg-neutral-800 border border-neutral-700 text-sm" />
         </div>
         <button type="submit" disabled={loading}
           className="mt-2 flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-60 text-white text-sm font-semibold rounded-md py-2">
@@ -449,22 +761,104 @@ function LoginScreen({ onLogin }) {
 /* 7) ÁREA DE CONFIGURAÇÃO (admin)                                      */
 /* ================================================================== */
 
-function AdminPanel({ token, dark, cardBg, mutedText }) {
+function WelcomeOverlay({ show, nome, dark }) {
+  return (
+    <div className={"fixed inset-0 z-[200] flex items-center justify-center transition-opacity duration-500 ease-out " +
+      (show ? "opacity-100" : "opacity-0 pointer-events-none") + " " +
+      (dark ? "bg-neutral-950" : "bg-white")}>
+      <div className="flex flex-col items-center text-center gap-2 px-6">
+        <img src={dark ? "/static/assets/logo-escuro.png" : "/static/assets/logo-claro.png"} alt="Grupo Raviera"
+          className="welcome-in h-11 w-auto object-contain mb-2" />
+
+        <h1 className={"welcome-in text-2xl sm:text-3xl font-bold tracking-tight text-balance " + (dark ? "text-neutral-50" : "text-neutral-900")} style={{ animationDelay: "0.05s" }}>
+          Bem-vindo{nome ? ", " + nome : ""}!
+        </h1>
+        <p className={"welcome-in text-sm font-medium " + (dark ? "text-neutral-400" : "text-neutral-500")} style={{ animationDelay: "0.12s" }}>
+          Todo dia é dia de criar algo novo.
+        </p>
+        <div className="welcome-line mt-3 h-[2px] w-14 rounded-full bg-blue-600" />
+      </div>
+    </div>
+  );
+}
+
+function ToastStack({ toasts, dark }) {
+  if (!toasts.length) return null;
+  return (
+    <div className="fixed top-4 right-4 z-[100] flex flex-col gap-2 w-[calc(100%-2rem)] max-w-sm pointer-events-none">
+      {toasts.map((t) => (
+        <div key={t.id}
+          className={"pointer-events-auto rounded-lg border px-3.5 py-3 shadow-lg text-xs font-medium flex items-start gap-2 " +
+            (t.leaving ? "toast-leave" : "toast-enter") + " " +
+            (t.type === "success"
+              ? (dark ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300" : "bg-emerald-50 border-emerald-200 text-emerald-700")
+              : (dark ? "bg-red-500/10 border-red-500/30 text-red-300" : "bg-red-50 border-red-200 text-red-700"))}>
+          {t.type === "success" ? <IconCheck className="h-4 w-4 shrink-0 mt-0.5" /> : <IconAlertCircle className="h-4 w-4 shrink-0 mt-0.5" />}
+          <span className="min-w-0">{t.message}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ConfirmModal({ confirm, onCancel, onConfirm, dark }) {
+  if (!confirm) return null;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4" onClick={onCancel}>
+      <div onClick={(e) => e.stopPropagation()}
+        className={"w-full max-w-sm rounded-xl border p-5 flex flex-col gap-4 shadow-xl " + (dark ? "bg-neutral-900 border-neutral-800" : "bg-white border-neutral-200")}>
+        <div className="flex items-start gap-3">
+          <div className={"h-9 w-9 shrink-0 rounded-lg flex items-center justify-center " + (dark ? "bg-red-500/10 text-red-400" : "bg-red-50 text-red-600")}>
+            <IconAlertTriangle className="h-4.5 w-4.5" />
+          </div>
+          <div className="min-w-0">
+            <p className="text-sm font-semibold">{confirm.message}</p>
+            <p className={"text-xs mt-1 " + (dark ? "text-neutral-400" : "text-neutral-500")}>Tem certeza que deseja fazer isso? Essa ação não pode ser desfeita.</p>
+          </div>
+        </div>
+        <div className="flex justify-end gap-2">
+          <button onClick={onCancel}
+            className={"px-3 py-1.5 rounded-md text-xs font-semibold border " + (dark ? "bg-neutral-800 border-neutral-700 text-neutral-200 hover:bg-neutral-700" : "bg-neutral-100 border-neutral-200 text-neutral-700 hover:bg-neutral-200")}>
+            Cancelar
+          </button>
+          <button onClick={onConfirm} className="px-3 py-1.5 rounded-md text-xs font-semibold bg-red-600 hover:bg-red-500 text-white">
+            Sim, excluir
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AdminPanel({ token, dark, cardBg, mutedText, pushToast }) {
   const [accounts, setAccounts] = useState([]);
+  const [igAccounts, setIgAccounts] = useState([]);
+  const [googleAccounts, setGoogleAccounts] = useState([]);
   const [brands, setBrands] = useState([]);
   const [users, setUsers] = useState([]);
-  const [error, setError] = useState("");
+  const [confirm, setConfirm] = useState(null);
+
+  function askConfirm(message, action) {
+    setConfirm({ message, action });
+  }
+  function handleConfirm() {
+    const action = confirm && confirm.action;
+    setConfirm(null);
+    if (action) action();
+  }
 
   async function reload() {
     try {
-      const [a, b, u] = await Promise.all([
+      const [a, ig, g, b, u] = await Promise.all([
         authJson("/admin/ad-accounts", token),
+        authJson("/admin/instagram-accounts", token),
+        authJson("/admin/google-ads-accounts", token),
         authJson("/admin/brands", token),
         authJson("/admin/users", token),
       ]);
-      setAccounts(a); setBrands(b); setUsers(u);
+      setAccounts(a); setIgAccounts(ig); setGoogleAccounts(g); setBrands(b); setUsers(u);
     } catch (e) {
-      setError(e.message);
+      pushToast(e.message, "error");
     }
   }
   useEffect(() => { reload(); }, []);
@@ -474,31 +868,31 @@ function AdminPanel({ token, dark, cardBg, mutedText }) {
       await fn();
       await reload();
     } catch (e) {
-      setError(e.message);
+      pushToast(e.message, "error");
     }
   }
 
   const [newAccount, setNewAccount] = useState({ meta_account_id: "", nome: "" });
-  const [newBrand, setNewBrand] = useState({ nome: "", tier: "", ad_account_id: "", campaign_filter: "", diario_esperado_meta: 0 });
-  const [newUser, setNewUser] = useState({ email: "", password: "", role: "gerente", brand_ids: [] });
+  const [newIgAccount, setNewIgAccount] = useState({ instagram_business_id: "", username: "", nome: "", access_token: "" });
+  const [newGoogleAccount, setNewGoogleAccount] = useState({ customer_id: "", nome: "" });
+  const [newBrand, setNewBrand] = useState({ nome: "", tier: "", ad_account_id: "", campaign_filter: "", diario_esperado_meta: 0, analista: "", instagram_account_id: "", google_ads_account_id: "", google_orcamento_mensal: 0 });
+  const [newUser, setNewUser] = useState({ nome: "", email: "", password: "", role: "gerente", brand_ids: [], ver_saldo: true, ver_investimento: true, ver_funil: true, ver_noticias: true });
 
-  const inputCls = "px-2 py-1.5 rounded-md border text-xs " + (dark ? "bg-slate-800 border-slate-700 text-slate-100" : "bg-white border-slate-200 text-slate-900");
+  const inputCls = "px-2 py-1.5 rounded-md border text-xs " + (dark ? "bg-neutral-800 border-neutral-700 text-neutral-100" : "bg-white border-neutral-200 text-neutral-900");
 
   return (
     <div className="flex flex-col gap-6">
-      {error && <div className="text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-md px-3 py-2">{error}</div>}
-
       <div className={"rounded-xl border p-4 " + cardBg}>
         <h2 className="text-sm font-bold mb-3">Contas de Anúncio (Meta)</h2>
         <table className="w-full text-sm mb-3">
           <thead><tr className={"text-left text-xs uppercase " + mutedText}><th className="pb-2">ID Meta</th><th className="pb-2">Nome</th><th className="pb-2"></th></tr></thead>
-          <tbody className={"divide-y " + (dark ? "divide-slate-800" : "divide-slate-100")}>
+          <tbody className={"divide-y " + (dark ? "divide-neutral-800" : "divide-neutral-100")}>
             {accounts.map((a) => (
               <tr key={a.id}>
                 <td className="py-1.5">{a.meta_account_id}</td>
                 <td className="py-1.5">{a.nome}</td>
                 <td className="py-1.5 text-right">
-                  <button onClick={() => withErrorHandling(() => authJson(`/admin/ad-accounts/${a.id}`, token, { method: "DELETE" }))} className="text-red-500"><IconTrash className="h-3.5 w-3.5" /></button>
+                  <button onClick={() => askConfirm(`Excluir a conta "${a.nome}"?`, () => withErrorHandling(() => authJson(`/admin/ad-accounts/${a.id}`, token, { method: "DELETE" })))} className="text-red-500"><IconTrash className="h-3.5 w-3.5" /></button>
                 </td>
               </tr>
             ))}
@@ -513,13 +907,66 @@ function AdminPanel({ token, dark, cardBg, mutedText }) {
       </div>
 
       <div className={"rounded-xl border p-4 " + cardBg}>
+        <h2 className="text-sm font-bold mb-1">Contas do Instagram</h2>
+        <p className={"text-xs mb-3 " + mutedText}>Usadas para medir o alcance orgânico (posts e seguidores). O ID é o "instagram_business_id" da conta na Graph API.</p>
+        <table className="w-full text-sm mb-3">
+          <thead><tr className={"text-left text-xs uppercase " + mutedText}><th className="pb-2">ID Instagram</th><th className="pb-2">Usuário</th><th className="pb-2">Nome</th><th className="pb-2"></th></tr></thead>
+          <tbody className={"divide-y " + (dark ? "divide-neutral-800" : "divide-neutral-100")}>
+            {igAccounts.map((a) => (
+              <tr key={a.id}>
+                <td className="py-1.5">{a.instagram_business_id}</td>
+                <td className="py-1.5">@{a.username}</td>
+                <td className="py-1.5">{a.nome}</td>
+                <td className="py-1.5 text-right">
+                  <button onClick={() => askConfirm(`Excluir a conta do Instagram "${a.nome}"?`, () => withErrorHandling(() => authJson(`/admin/instagram-accounts/${a.id}`, token, { method: "DELETE" })))} className="text-red-500"><IconTrash className="h-3.5 w-3.5" /></button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <div className="flex flex-wrap gap-2 items-end">
+          <input placeholder="ID do Instagram (ex: 178143...)" className={inputCls} value={newIgAccount.instagram_business_id} onChange={(e) => setNewIgAccount({ ...newIgAccount, instagram_business_id: e.target.value })} />
+          <input placeholder="Usuário (sem @)" className={inputCls} value={newIgAccount.username} onChange={(e) => setNewIgAccount({ ...newIgAccount, username: e.target.value })} />
+          <input placeholder="Nome (ex: BMW Motorrad)" className={inputCls} value={newIgAccount.nome} onChange={(e) => setNewIgAccount({ ...newIgAccount, nome: e.target.value })} />
+          <input type="password" placeholder="Token de acesso (do Business Manager dessa marca)" className={inputCls + " min-w-[260px]"} value={newIgAccount.access_token} onChange={(e) => setNewIgAccount({ ...newIgAccount, access_token: e.target.value })} />
+          <button onClick={() => withErrorHandling(async () => { await authJson("/admin/instagram-accounts", token, { method: "POST", body: JSON.stringify(newIgAccount) }); setNewIgAccount({ instagram_business_id: "", username: "", nome: "", access_token: "" }); })}
+            className="px-3 py-1.5 rounded-md text-xs font-semibold bg-blue-600 text-white">Adicionar conta</button>
+        </div>
+      </div>
+
+      <div className={"rounded-xl border p-4 " + cardBg}>
+        <h2 className="text-sm font-bold mb-1">Contas do Google Ads</h2>
+        <p className={"text-xs mb-3 " + mutedText}>Customer ID de cada conta do Google Ads (só números, sem hífen).</p>
+        <table className="w-full text-sm mb-3">
+          <thead><tr className={"text-left text-xs uppercase " + mutedText}><th className="pb-2">Customer ID</th><th className="pb-2">Nome</th><th className="pb-2"></th></tr></thead>
+          <tbody className={"divide-y " + (dark ? "divide-neutral-800" : "divide-neutral-100")}>
+            {googleAccounts.map((a) => (
+              <tr key={a.id}>
+                <td className="py-1.5">{a.customer_id}</td>
+                <td className="py-1.5">{a.nome}</td>
+                <td className="py-1.5 text-right">
+                  <button onClick={() => askConfirm(`Excluir a conta do Google Ads "${a.nome}"?`, () => withErrorHandling(() => authJson(`/admin/google-ads-accounts/${a.id}`, token, { method: "DELETE" })))} className="text-red-500"><IconTrash className="h-3.5 w-3.5" /></button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <div className="flex flex-wrap gap-2 items-end">
+          <input placeholder="Customer ID (ex: 1234567890)" className={inputCls} value={newGoogleAccount.customer_id} onChange={(e) => setNewGoogleAccount({ ...newGoogleAccount, customer_id: e.target.value })} />
+          <input placeholder="Nome (ex: Xapuri Motors Toyota)" className={inputCls} value={newGoogleAccount.nome} onChange={(e) => setNewGoogleAccount({ ...newGoogleAccount, nome: e.target.value })} />
+          <button onClick={() => withErrorHandling(async () => { await authJson("/admin/google-ads-accounts", token, { method: "POST", body: JSON.stringify(newGoogleAccount) }); setNewGoogleAccount({ customer_id: "", nome: "" }); })}
+            className="px-3 py-1.5 rounded-md text-xs font-semibold bg-blue-600 text-white">Adicionar conta</button>
+        </div>
+      </div>
+
+      <div className={"rounded-xl border p-4 " + cardBg}>
         <h2 className="text-sm font-bold mb-1">Marcas</h2>
         <p className={"text-xs mb-3 " + mutedText}>Se várias marcas dividem a mesma conta, use "Filtro de campanha" com o prefixo do nome das campanhas de cada marca no Meta.</p>
         <table className="w-full text-sm mb-3 min-w-[640px]">
           <thead><tr className={"text-left text-xs uppercase " + mutedText}>
-            <th className="pb-2">Marca</th><th className="pb-2">Tier</th><th className="pb-2">Conta</th><th className="pb-2">Filtro campanha</th><th className="pb-2">Diário esperado</th><th className="pb-2"></th>
+            <th className="pb-2">Marca</th><th className="pb-2">Tier</th><th className="pb-2">Conta</th><th className="pb-2">Filtro campanha</th><th className="pb-2">Diário esperado</th><th className="pb-2">Analista</th><th className="pb-2">Instagram</th><th className="pb-2">Google Ads</th><th className="pb-2">Orç. mensal Google</th><th className="pb-2"></th>
           </tr></thead>
-          <tbody className={"divide-y " + (dark ? "divide-slate-800" : "divide-slate-100")}>
+          <tbody className={"divide-y " + (dark ? "divide-neutral-800" : "divide-neutral-100")}>
             {brands.map((b) => (
               <tr key={b.id}>
                 <td className="py-1.5 font-semibold">{b.nome}</td>
@@ -527,8 +974,12 @@ function AdminPanel({ token, dark, cardBg, mutedText }) {
                 <td className="py-1.5">{(accounts.find((a) => a.id === b.ad_account_id) || {}).nome || "—"}</td>
                 <td className="py-1.5">{b.campaign_filter || "—"}</td>
                 <td className="py-1.5">{fmtBRL(b.diario_esperado_meta)}</td>
+                <td className="py-1.5">{b.analista || "—"}</td>
+                <td className="py-1.5">{(igAccounts.find((a) => a.id === b.instagram_account_id) || {}).username ? "@" + igAccounts.find((a) => a.id === b.instagram_account_id).username : "—"}</td>
+                <td className="py-1.5">{(googleAccounts.find((a) => a.id === b.google_ads_account_id) || {}).customer_id || "—"}</td>
+                <td className="py-1.5">{fmtBRL(b.google_orcamento_mensal)}</td>
                 <td className="py-1.5 text-right">
-                  <button onClick={() => withErrorHandling(() => authJson(`/admin/brands/${b.id}`, token, { method: "DELETE" }))} className="text-red-500"><IconTrash className="h-3.5 w-3.5" /></button>
+                  <button onClick={() => askConfirm(`Excluir a marca "${b.nome}"? Todo o histórico de tráfego e criativos dessa marca será perdido.`, () => withErrorHandling(() => authJson(`/admin/brands/${b.id}`, token, { method: "DELETE" })))} className="text-red-500"><IconTrash className="h-3.5 w-3.5" /></button>
                 </td>
               </tr>
             ))}
@@ -543,9 +994,19 @@ function AdminPanel({ token, dark, cardBg, mutedText }) {
           </select>
           <input placeholder="Filtro de campanha (opcional)" className={inputCls} value={newBrand.campaign_filter} onChange={(e) => setNewBrand({ ...newBrand, campaign_filter: e.target.value })} />
           <input type="number" placeholder="Diário esperado" className={inputCls} value={newBrand.diario_esperado_meta} onChange={(e) => setNewBrand({ ...newBrand, diario_esperado_meta: e.target.value })} />
+          <input placeholder="Analista (ex: Felipe)" className={inputCls} value={newBrand.analista} onChange={(e) => setNewBrand({ ...newBrand, analista: e.target.value })} />
+          <select className={inputCls} value={newBrand.instagram_account_id} onChange={(e) => setNewBrand({ ...newBrand, instagram_account_id: e.target.value })}>
+            <option value="">Conta do Instagram (opcional)...</option>
+            {igAccounts.map((a) => <option key={a.id} value={a.id}>@{a.username}</option>)}
+          </select>
+          <select className={inputCls} value={newBrand.google_ads_account_id} onChange={(e) => setNewBrand({ ...newBrand, google_ads_account_id: e.target.value })}>
+            <option value="">Conta do Google Ads (opcional)...</option>
+            {googleAccounts.map((a) => <option key={a.id} value={a.id}>{a.nome} ({a.customer_id})</option>)}
+          </select>
+          <input type="number" placeholder="Orçamento mensal Google" className={inputCls} value={newBrand.google_orcamento_mensal} onChange={(e) => setNewBrand({ ...newBrand, google_orcamento_mensal: e.target.value })} />
           <button onClick={() => withErrorHandling(async () => {
-            await authJson("/admin/brands", token, { method: "POST", body: JSON.stringify({ ...newBrand, ad_account_id: newBrand.ad_account_id ? Number(newBrand.ad_account_id) : null, diario_esperado_meta: Number(newBrand.diario_esperado_meta) || 0 }) });
-            setNewBrand({ nome: "", tier: "", ad_account_id: "", campaign_filter: "", diario_esperado_meta: 0 });
+            await authJson("/admin/brands", token, { method: "POST", body: JSON.stringify({ ...newBrand, ad_account_id: newBrand.ad_account_id ? Number(newBrand.ad_account_id) : null, diario_esperado_meta: Number(newBrand.diario_esperado_meta) || 0, instagram_account_id: newBrand.instagram_account_id ? Number(newBrand.instagram_account_id) : null, google_ads_account_id: newBrand.google_ads_account_id ? Number(newBrand.google_ads_account_id) : null, google_orcamento_mensal: Number(newBrand.google_orcamento_mensal) || 0 }) });
+            setNewBrand({ nome: "", tier: "", ad_account_id: "", campaign_filter: "", diario_esperado_meta: 0, analista: "", instagram_account_id: "", google_ads_account_id: "", google_orcamento_mensal: 0 });
           })} className="px-3 py-1.5 rounded-md text-xs font-semibold bg-blue-600 text-white">Adicionar marca</button>
         </div>
       </div>
@@ -553,22 +1014,47 @@ function AdminPanel({ token, dark, cardBg, mutedText }) {
       <div className={"rounded-xl border p-4 " + cardBg}>
         <h2 className="text-sm font-bold mb-3">Usuários</h2>
         <table className="w-full text-sm mb-3 min-w-[640px]">
-          <thead><tr className={"text-left text-xs uppercase " + mutedText}><th className="pb-2">E-mail</th><th className="pb-2">Papel</th><th className="pb-2">Marcas</th><th className="pb-2"></th></tr></thead>
-          <tbody className={"divide-y " + (dark ? "divide-slate-800" : "divide-slate-100")}>
+          <thead><tr className={"text-left text-xs uppercase " + mutedText}><th className="pb-2">Nome</th><th className="pb-2">E-mail</th><th className="pb-2">Papel</th><th className="pb-2">Marcas</th><th className="pb-2">O que pode ver</th><th className="pb-2"></th></tr></thead>
+          <tbody className={"divide-y " + (dark ? "divide-neutral-800" : "divide-neutral-100")}>
             {users.map((u) => (
               <tr key={u.id}>
+                <td className="py-1.5 font-semibold">{u.nome || "—"}</td>
                 <td className="py-1.5">{u.email}</td>
                 <td className="py-1.5">{u.role}</td>
                 <td className="py-1.5">{u.role === "admin" ? "Todas" : u.brand_ids.map((id) => (brands.find((b) => b.id === id) || {}).nome).filter(Boolean).join(", ") || "Nenhuma"}</td>
+                <td className="py-1.5">
+                  {u.role === "admin" ? (
+                    <span className={"text-xs " + mutedText}>Tudo (admin)</span>
+                  ) : (
+                    <div className="flex flex-wrap gap-1">
+                      {[
+                        { campo: "ver_saldo", label: "Saldo" },
+                        { campo: "ver_investimento", label: "Investimento" },
+                        { campo: "ver_funil", label: "Info. Gerais" },
+                        { campo: "ver_noticias", label: "Notícias" },
+                      ].map((p) => (
+                        <button key={p.campo}
+                          onClick={() => withErrorHandling(() => authJson(`/admin/users/${u.id}`, token, { method: "PUT", body: JSON.stringify({ [p.campo]: !u[p.campo] }) }))}
+                          title={u[p.campo] ? `Clique pra esconder ${p.label.toLowerCase()} desse usuário` : `Clique pra liberar ${p.label.toLowerCase()} pra esse usuário`}
+                          className={"text-[11px] px-1.5 py-0.5 rounded-full border font-semibold " +
+                            (u[p.campo] ? (dark ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-400" : "bg-emerald-50 border-emerald-200 text-emerald-700") : (dark ? "bg-neutral-800 border-neutral-700 text-neutral-500" : "bg-neutral-100 border-neutral-200 text-neutral-400"))}>
+                          {p.label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </td>
                 <td className="py-1.5 text-right">
-                  <button onClick={() => withErrorHandling(() => authJson(`/admin/users/${u.id}`, token, { method: "DELETE" }))} className="text-red-500"><IconTrash className="h-3.5 w-3.5" /></button>
+                  <button onClick={() => askConfirm(`Excluir o usuário "${u.email}"?`, () => withErrorHandling(() => authJson(`/admin/users/${u.id}`, token, { method: "DELETE" })))} className="text-red-500"><IconTrash className="h-3.5 w-3.5" /></button>
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
+        <p className={"text-[11px] mb-3 -mt-1 " + mutedText}>Clique nos rótulos "Saldo" / "Investimento" / "Info. Gerais" / "Notícias" pra liberar ou esconder cada um, marca a marca não é possível — vale pra todas as marcas que esse usuário acessa.</p>
         <div className="flex flex-col gap-2">
           <div className="flex flex-wrap gap-2 items-end">
+            <input placeholder="Nome" className={inputCls} value={newUser.nome} onChange={(e) => setNewUser({ ...newUser, nome: e.target.value })} />
             <input type="email" placeholder="E-mail" className={inputCls} value={newUser.email} onChange={(e) => setNewUser({ ...newUser, email: e.target.value })} />
             <input type="password" placeholder="Senha inicial" className={inputCls} value={newUser.password} onChange={(e) => setNewUser({ ...newUser, password: e.target.value })} />
             <select className={inputCls} value={newUser.role} onChange={(e) => setNewUser({ ...newUser, role: e.target.value })}>
@@ -591,58 +1077,125 @@ function AdminPanel({ token, dark, cardBg, mutedText }) {
               })}
             </div>
           )}
+          {newUser.role === "gerente" && (
+            <div className="flex flex-wrap gap-2 items-center">
+              <span className={"text-xs " + mutedText}>Pode ver:</span>
+              {[
+                { campo: "ver_saldo", label: "Saldo" },
+                { campo: "ver_investimento", label: "Investimento" },
+                { campo: "ver_funil", label: "Informações Gerais" },
+                { campo: "ver_noticias", label: "Notícias do Setor" },
+              ].map((p) => (
+                <label key={p.campo} className={"text-xs px-2 py-1 rounded-md border cursor-pointer " + (newUser[p.campo] ? "bg-blue-600 text-white border-blue-600" : inputCls)}>
+                  <input type="checkbox" className="hidden" checked={newUser[p.campo]} onChange={() => setNewUser({ ...newUser, [p.campo]: !newUser[p.campo] })} />
+                  {p.label}
+                </label>
+              ))}
+            </div>
+          )}
           <button onClick={() => withErrorHandling(async () => {
             await authJson("/admin/users", token, { method: "POST", body: JSON.stringify(newUser) });
-            setNewUser({ email: "", password: "", role: "gerente", brand_ids: [] });
+            setNewUser({ nome: "", email: "", password: "", role: "gerente", brand_ids: [], ver_saldo: true, ver_investimento: true, ver_funil: true, ver_noticias: true });
           })} className="self-start px-3 py-1.5 rounded-md text-xs font-semibold bg-blue-600 text-white">Adicionar usuário</button>
         </div>
       </div>
+
+      <ConfirmModal confirm={confirm} dark={dark} onCancel={() => setConfirm(null)} onConfirm={handleConfirm} />
     </div>
   );
 }
 
 /* ================================================================== */
-/* 8) DASHBOARD PRINCIPAL                                               */
+/* 7b) DASHBOARD GOOGLE ADS                                             */
 /* ================================================================== */
 
-function RavieraDashboard({ token, role, email, onLogout }) {
-  const [dark, setDark] = useState(() => localStorage.getItem("raviera_theme") !== "light");
-  const [logoUrl, setLogoUrl] = useState(() => localStorage.getItem("raviera_logo") || null);
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [view, setView] = useState("dashboard"); // "dashboard" | "config"
+function KeywordCard({ kw, dark, cardBg, mutedText }) {
+  return (
+    <div className={"rounded-xl border p-3 flex gap-2.5 items-center " + cardBg}>
+      <span className="text-lg leading-none shrink-0">{RANK_MEDAL[kw.rank] || kw.rank}</span>
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-semibold truncate">{kw.texto || "—"}</p>
+        <p className={"text-xs " + mutedText}>
+          Investido {fmtBRL(kw.gasto)} · {fmtNum(kw.cliques)} cliques · {fmtNum(kw.conversoes)} conv. · CPA {fmtBRL(kw.custoPorConversao)}
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function KeywordsBrandGroup({ item, dark, cardBg, mutedText }) {
+  return (
+    <div className="flex flex-col gap-2">
+      <p className={"text-[11px] font-semibold uppercase tracking-wide " + mutedText}>{item.marca}</p>
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+        {item.palavrasChave.map((k) => (
+          <KeywordCard key={k.rank} kw={k} dark={dark} cardBg={cardBg} mutedText={mutedText} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function LocationHeatRow({ loc, maxConversoes, dark, mutedText }) {
+  const intensidade = maxConversoes > 0 ? loc.conversoes / maxConversoes : 0;
+  return (
+    <div className={"relative rounded-lg overflow-hidden border " + (dark ? "border-neutral-800" : "border-neutral-200")}>
+      <div className="absolute inset-y-0 left-0" style={{
+        width: (8 + intensidade * 92) + "%",
+        background: dark ? "rgba(248,113,113," + (0.1 + intensidade * 0.35).toFixed(2) + ")" : "rgba(220,38,38," + (0.06 + intensidade * 0.3).toFixed(2) + ")",
+      }} />
+      <div className="relative flex items-center justify-between gap-2 px-3 py-2 text-xs">
+        <span className="font-semibold truncate">{loc.cidade}{loc.estado ? " · " + loc.estado : ""}</span>
+        <span className={"shrink-0 " + mutedText}>{fmtNum(loc.conversoes)} conv. · {fmtNum(loc.cliques)} cliques · {fmtBRL(loc.gasto)}</span>
+      </div>
+    </div>
+  );
+}
+
+function LocationHeatmapBrandGroup({ item, dark, mutedText }) {
+  const maxConversoes = Math.max(...item.localidades.map((l) => l.conversoes), 0.001);
+  return (
+    <div className="flex flex-col gap-2">
+      <p className={"text-[11px] font-semibold uppercase tracking-wide " + mutedText}>{item.marca}</p>
+      <div className="flex flex-col gap-1.5">
+        {item.localidades.map((l) => (
+          <LocationHeatRow key={l.cidade} loc={l} maxConversoes={maxConversoes} dark={dark} mutedText={mutedText} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function GoogleAdsDashboard({ token, dark, cardBg, mutedText, pushToast, permissoes }) {
   const [marcaFiltro, setMarcaFiltro] = useState("todas");
   const [periodo, setPeriodo] = useState("mesAtual");
+  const [comparativoTipo, setComparativoTipo] = useState("mesAnterior");
   const [customStart, setCustomStart] = useState("");
   const [customEnd, setCustomEnd] = useState("");
-  const [sortConfig, setSortConfig] = useState({ key: "status", dir: "asc" });
-
-  const [dashboardData, setDashboardData] = useState({ brands: [], trafego: [], saldos: [], topCreatives: [], meta: {} });
+  const [dashboardData, setDashboardData] = useState({ brands: [], trafego: [], orcamentos: [], topKeywords: [], heatmap: [], meta: {} });
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
-
-  useEffect(() => { localStorage.setItem("raviera_theme", dark ? "dark" : "light"); }, [dark]);
-  useEffect(() => { if (logoUrl) localStorage.setItem("raviera_logo", logoUrl); else localStorage.removeItem("raviera_logo"); }, [logoUrl]);
+  const [syncing, setSyncing] = useState(false);
 
   async function loadDashboard() {
     setLoading(true);
     try {
-      const data = await authJson("/api/dashboard", token);
+      const data = await authJson("/api/dashboard/google", token);
       setDashboardData(data);
-      setError("");
     } catch (e) {
-      setError(e.message);
+      pushToast(e.message, "error");
     } finally {
       setLoading(false);
     }
   }
   async function refreshData() {
-    setLoading(true);
+    setSyncing(true);
     try {
       await authJson("/api/sync", token, { method: "POST" });
       await loadDashboard();
     } catch (e) {
-      setError(e.message);
-      setLoading(false);
+      pushToast(e.message, "error");
+    } finally {
+      setSyncing(false);
     }
   }
   useEffect(() => { loadDashboard(); }, []);
@@ -651,7 +1204,892 @@ function RavieraDashboard({ token, role, email, onLogout }) {
   const brandsToShow = useMemo(() => (marcaFiltro === "todas" ? brandsList : [marcaFiltro]), [marcaFiltro, brandsList]);
 
   const range = useMemo(() => getPeriodRange(periodo, customStart, customEnd), [periodo, customStart, customEnd]);
-  const prevRange = useMemo(() => getPreviousRange(range), [range]);
+  const prevRange = useMemo(
+    () => (periodo === "comparativo" ? getComparativoRange(range, comparativoTipo) : getPreviousRange(range)),
+    [range, periodo, comparativoTipo]
+  );
+
+  const scopedTrafego = useMemo(() => dashboardData.trafego.filter((r) => brandsToShow.includes(r.marca)), [dashboardData.trafego, brandsToShow]);
+  const currentRecords = useMemo(() => filterByRange(scopedTrafego, range), [scopedTrafego, range]);
+  const previousRecords = useMemo(() => filterByRange(scopedTrafego, prevRange), [scopedTrafego, prevRange]);
+
+  function aggregateGoogle(records) {
+    const base = records.reduce((acc, r) => { acc.gasto += r.gasto; acc.cliques += r.cliques; acc.conversoes += r.conversoes; return acc; }, { gasto: 0, cliques: 0, conversoes: 0 });
+    base.cpa = base.conversoes > 0 ? base.gasto / base.conversoes : 0;
+    return base;
+  }
+  const currentAgg = useMemo(() => aggregateGoogle(currentRecords), [currentRecords]);
+  const previousAgg = useMemo(() => aggregateGoogle(previousRecords), [previousRecords]);
+
+  const topKeywordsToShow = useMemo(() => dashboardData.topKeywords.filter((g) => brandsToShow.includes(g.marca)), [dashboardData.topKeywords, brandsToShow]);
+  const heatmapToShow = useMemo(() => dashboardData.heatmap.filter((g) => brandsToShow.includes(g.marca)), [dashboardData.heatmap, brandsToShow]);
+
+  const [keywordsExpanded, setKeywordsExpanded] = useState(false);
+  const [heatmapExpanded, setHeatmapExpanded] = useState(false);
+  useEffect(() => { setKeywordsExpanded(false); setHeatmapExpanded(false); }, [brandsToShow]);
+  const KEYWORDS_PREVIEW_COUNT = 3;
+  const HEATMAP_PREVIEW_COUNT = 3;
+  const keywordsToRender = keywordsExpanded ? topKeywordsToShow : topKeywordsToShow.slice(0, KEYWORDS_PREVIEW_COUNT);
+  const hasMoreKeywords = topKeywordsToShow.length > KEYWORDS_PREVIEW_COUNT;
+  const heatmapToRender = heatmapExpanded ? heatmapToShow : heatmapToShow.slice(0, HEATMAP_PREVIEW_COUNT);
+  const hasMoreHeatmap = heatmapToShow.length > HEATMAP_PREVIEW_COUNT;
+
+  const linhasOrcamento = useMemo(() => {
+    return brandsToShow.map((marca) => {
+      const orc = dashboardData.orcamentos.find((o) => o.marca === marca) || {};
+      const recs = filterByRange(dashboardData.trafego.filter((r) => r.marca === marca), range);
+      const agg = aggregateGoogle(recs);
+      return {
+        marca, orcamentoDiario: orc.orcamentoDiario || 0, status: orc.status || "",
+        orcamentoMensal: orc.orcamentoMensal || 0, gastoMesAtual: orc.gastoMesAtual || 0, saldoAtual: orc.saldoAtual || 0,
+        gasto: agg.gasto, cliques: agg.cliques, conversoes: agg.conversoes, cpa: agg.cpa,
+      };
+    });
+  }, [brandsToShow, dashboardData.orcamentos, dashboardData.trafego, range]);
+
+  const totals = useMemo(() => {
+    const t = linhasOrcamento.reduce((acc, r) => {
+      acc.gasto += r.gasto; acc.cliques += r.cliques; acc.conversoes += r.conversoes; acc.orcamentoDiario += r.orcamentoDiario;
+      acc.orcamentoMensal += r.orcamentoMensal; acc.saldoAtual += r.saldoAtual;
+      return acc;
+    }, { gasto: 0, cliques: 0, conversoes: 0, orcamentoDiario: 0, orcamentoMensal: 0, saldoAtual: 0 });
+    t.cpa = t.conversoes > 0 ? t.gasto / t.conversoes : 0;
+    return t;
+  }, [linhasOrcamento]);
+
+  const previousLabel = comparativoTipo === "anoAnterior" ? "mesmo mês " + prevRange.start.getFullYear() : "mês anterior";
+
+  return (
+    <div className="flex flex-col gap-6">
+      {dashboardData.meta.demoMode && (
+        <div className={"rounded-lg border px-3 py-2 flex items-center gap-2 text-xs " + (dark ? "bg-amber-500/5 border-amber-500/20 text-amber-400" : "bg-amber-50 border-amber-200 text-amber-700")}>
+          <IconRefresh className="h-3.5 w-3.5 shrink-0" />
+          Exibindo dados de demonstração (credenciais do Google Ads não configuradas no servidor).
+        </div>
+      )}
+
+      {syncing && (
+        <div className={"rounded-lg border px-3 py-2 flex items-center gap-2 text-xs " + (dark ? "bg-blue-500/5 border-blue-500/20 text-blue-400" : "bg-blue-50 border-blue-200 text-blue-700")}>
+          <IconRefresh className="h-3.5 w-3.5 shrink-0 animate-spin" />
+          Sincronizando com o Meta e o Google Ads — pode levar alguns minutos. Não clique de novo nem feche esta aba.
+        </div>
+      )}
+
+      <div className={"rounded-xl border p-3 flex flex-wrap items-center gap-3 " + cardBg}>
+        <div className="flex items-center gap-1.5"><IconCalendar className={"h-4 w-4 " + mutedText} /><span className={"text-xs font-medium " + mutedText}>Período:</span></div>
+        <div className="flex flex-wrap gap-1">
+          {[{ id: "mesAtual", label: "Mês Atual" }, { id: "mesAnterior", label: "Mês Anterior" }, { id: "comparativo", label: "Comparativo" }, { id: "custom", label: "Customizado" }].map((p) => (
+            <button key={p.id} onClick={() => setPeriodo(p.id)} className={"px-3 py-1.5 rounded-md text-xs font-semibold transition-colors " + (periodo === p.id ? "bg-blue-600 text-white" : (dark ? "bg-neutral-800 text-neutral-300 hover:bg-neutral-700" : "bg-neutral-100 text-neutral-600 hover:bg-neutral-200"))}>{p.label}</button>
+          ))}
+        </div>
+        <span className={"text-xs " + mutedText}>
+          {range.start.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" })} – {range.end.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" })}
+        </span>
+        {periodo === "comparativo" && (
+          <div className="w-full flex flex-wrap items-center gap-3">
+            <span className={"text-xs font-medium " + mutedText}>Comparar com:</span>
+            <div className="flex flex-wrap gap-1">
+              {[{ id: "mesAnterior", label: "Mês Anterior" }, { id: "anoAnterior", label: "Mesmo Mês Ano Passado" }].map((c) => (
+                <button key={c.id} onClick={() => setComparativoTipo(c.id)} className={"px-3 py-1.5 rounded-md text-xs font-semibold transition-colors " + (comparativoTipo === c.id ? "bg-blue-600 text-white" : (dark ? "bg-neutral-800 text-neutral-300 hover:bg-neutral-700" : "bg-neutral-100 text-neutral-600 hover:bg-neutral-200"))}>{c.label}</button>
+              ))}
+            </div>
+            <span className={"text-xs " + mutedText}>
+              vs {prevRange.start.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric" })} – {prevRange.end.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric" })}
+            </span>
+          </div>
+        )}
+        {periodo === "custom" && (
+          <div className="flex items-center gap-2">
+            <input type="date" value={customStart} onChange={(e) => setCustomStart(e.target.value)} className={"px-2 py-1.5 rounded-md border text-xs " + (dark ? "bg-neutral-800 border-neutral-700 text-neutral-100" : "bg-white border-neutral-200")} />
+            <span className={"text-xs " + mutedText}>até</span>
+            <input type="date" value={customEnd} onChange={(e) => setCustomEnd(e.target.value)} className={"px-2 py-1.5 rounded-md border text-xs " + (dark ? "bg-neutral-800 border-neutral-700 text-neutral-100" : "bg-white border-neutral-200")} />
+          </div>
+        )}
+        <div className="flex items-center gap-3 ml-auto">
+          <div className="flex items-center gap-1.5 text-xs">
+            <span className={mutedText}>{fmtAtualizado(dashboardData.meta.lastSync)}</span>
+            <button onClick={refreshData} disabled={loading || syncing} aria-label="Atualizar dados"
+              className={"h-7 w-7 flex items-center justify-center rounded-md border disabled:opacity-50 " + (dark ? "bg-neutral-800 border-neutral-700" : "bg-neutral-100 border-neutral-200")}>
+              <IconRefresh className={"h-3.5 w-3.5 " + mutedText + (loading || syncing ? " animate-spin" : "")} />
+            </button>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <IconBuilding className={"h-4 w-4 " + mutedText} />
+            <div className="relative">
+              <select value={marcaFiltro} onChange={(e) => setMarcaFiltro(e.target.value)} className={"appearance-none pl-3 pr-8 py-1.5 rounded-md border text-xs font-semibold cursor-pointer " + (dark ? "bg-neutral-800 border-neutral-700 text-neutral-100" : "bg-white border-neutral-200 text-neutral-900")}>
+                <option value="todas">Todas as Marcas</option>
+                {brandsList.map((m) => <option key={m} value={m}>{m}</option>)}
+              </select>
+              <IconChevronDown className={"h-3.5 w-3.5 absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none " + mutedText} />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        {permissoes.verInvestimento && (
+          <KpiCard IconComp={IconDollar} label="Investimento" value={fmtBRL(currentAgg.gasto)} badgeValue={variacao(currentAgg.gasto, previousAgg.gasto)} previousValue={periodo === "comparativo" ? fmtBRL(previousAgg.gasto) : undefined} previousLabel={previousLabel} dark={dark} accent="#3b82f6" />
+        )}
+        <KpiCard IconComp={IconTarget} label="Cliques" value={fmtNum(currentAgg.cliques)} badgeValue={variacao(currentAgg.cliques, previousAgg.cliques)} previousValue={periodo === "comparativo" ? fmtNum(previousAgg.cliques) : undefined} previousLabel={previousLabel} dark={dark} accent="#6366f1" />
+        <KpiCard IconComp={IconCheck} label="Conversões" value={fmtNum(currentAgg.conversoes)} badgeValue={variacao(currentAgg.conversoes, previousAgg.conversoes)} previousValue={periodo === "comparativo" ? fmtNum(previousAgg.conversoes) : undefined} previousLabel={previousLabel} dark={dark} accent="#a855f7" />
+        {permissoes.verSaldo && (
+          <KpiCard IconComp={IconAlertCircle} label="Saldo Total" value={fmtBRL(totals.saldoAtual)} dark={dark} accent={totals.saldoAtual >= 0 ? "#10b981" : "#ef4444"} />
+        )}
+      </div>
+
+      {topKeywordsToShow.length > 0 && (
+        <div className={"rounded-xl border p-4 " + cardBg}>
+          <h2 className="text-sm font-bold mb-1 flex items-center gap-1.5"><IconAward className="h-4 w-4 text-amber-500" /> Impacto das Palavras-Chave por Marca</h2>
+          <p className={"text-xs mb-3 " + mutedText}>Palavras-chave com mais conversões de cada marca nos últimos 30 dias</p>
+          <div className="flex flex-col gap-4">
+            {keywordsToRender.map((item) => (
+              <KeywordsBrandGroup key={item.brandId} item={item} dark={dark} cardBg={cardBg} mutedText={mutedText} />
+            ))}
+          </div>
+          {hasMoreKeywords && (
+            <button onClick={() => setKeywordsExpanded((v) => !v)}
+              className={"mt-4 w-full flex items-center justify-center gap-1.5 py-2 rounded-md text-xs font-semibold border transition-colors " +
+                (dark ? "bg-neutral-800 border-neutral-700 text-neutral-200 hover:bg-neutral-700" : "bg-neutral-100 border-neutral-200 text-neutral-700 hover:bg-neutral-200")}>
+              {keywordsExpanded ? "Ver menos" : "Ver todas (" + topKeywordsToShow.length + ")"}
+              <IconChevronDown className={"h-3.5 w-3.5 transition-transform" + (keywordsExpanded ? " rotate-180" : "")} />
+            </button>
+          )}
+        </div>
+      )}
+
+      {heatmapToShow.length > 0 && (
+        <div className={"rounded-xl border p-4 " + cardBg}>
+          <h2 className="text-sm font-bold mb-1 flex items-center gap-1.5">🗺️ Mapa de Calor por Localidade</h2>
+          <p className={"text-xs mb-3 " + mutedText}>Cidades onde as pessoas realmente estavam ao clicar/converter, nos últimos 30 dias</p>
+          <div className="flex flex-col gap-4">
+            {heatmapToRender.map((item) => (
+              <LocationHeatmapBrandGroup key={item.brandId} item={item} dark={dark} mutedText={mutedText} />
+            ))}
+          </div>
+          {hasMoreHeatmap && (
+            <button onClick={() => setHeatmapExpanded((v) => !v)}
+              className={"mt-4 w-full flex items-center justify-center gap-1.5 py-2 rounded-md text-xs font-semibold border transition-colors " +
+                (dark ? "bg-neutral-800 border-neutral-700 text-neutral-200 hover:bg-neutral-700" : "bg-neutral-100 border-neutral-200 text-neutral-700 hover:bg-neutral-200")}>
+              {heatmapExpanded ? "Ver menos" : "Ver todas (" + heatmapToShow.length + ")"}
+              <IconChevronDown className={"h-3.5 w-3.5 transition-transform" + (heatmapExpanded ? " rotate-180" : "")} />
+            </button>
+          )}
+        </div>
+      )}
+
+      {permissoes.verSaldo && (
+      <div className={"rounded-xl border p-4 overflow-x-auto " + cardBg}>
+        <h2 className="text-sm font-bold mb-1">Orçamento das Contas (Google Ads)</h2>
+        <p className={"text-xs mb-4 " + mutedText}>Orçamento diário configurado nas campanhas ativas de cada conta</p>
+        <table className="w-full text-sm min-w-[680px]">
+          <thead><tr className={"text-left text-xs uppercase tracking-wide " + mutedText}>
+            <th className="pb-2">Marca</th>
+            <th className="pb-2">Investimento</th>
+            <th className="pb-2">Cliques</th>
+            <th className="pb-2">Conversões</th>
+            <th className="pb-2">Orçamento Mensal</th>
+            <th className="pb-2">Saldo Atual</th>
+            <th className="pb-2">Orçamento Diário</th>
+            <th className="pb-2">Status</th>
+          </tr></thead>
+          <tbody className={"divide-y " + (dark ? "divide-neutral-800" : "divide-neutral-100")}>
+            {linhasOrcamento.map((row) => (
+              <tr key={row.marca}>
+                <td className="py-2.5 font-semibold">{row.marca}</td>
+                <td className="py-2.5 tabular-nums">{fmtBRL(row.gasto)}</td>
+                <td className="py-2.5 tabular-nums">{fmtNum(row.cliques)}</td>
+                <td className="py-2.5 tabular-nums">{fmtNum(row.conversoes)}</td>
+                <td className="py-2.5 tabular-nums">{fmtBRL(row.orcamentoMensal)}</td>
+                <td className={"py-2.5 tabular-nums font-semibold " + (row.saldoAtual >= 0 ? (dark ? "text-emerald-400" : "text-emerald-700") : (dark ? "text-red-400" : "text-red-700"))}>{fmtBRL(row.saldoAtual)}</td>
+                <td className="py-2.5 tabular-nums">{fmtBRL(row.orcamentoDiario)}</td>
+                <td className="py-2.5">
+                  <span className={"inline-flex items-center gap-1 rounded-full px-2 py-1 text-xs font-semibold " + (row.status === "ENABLED" ? (dark ? "bg-emerald-500/10 text-emerald-400" : "bg-emerald-50 text-emerald-700") : (dark ? "bg-neutral-500/10 text-neutral-400" : "bg-neutral-100 text-neutral-500"))}>
+                    {row.status === "ENABLED" ? "Ativa" : (row.status || "—")}
+                  </span>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+          <tfoot>
+            <tr className={"border-t font-semibold " + (dark ? "border-neutral-800" : "border-neutral-200")}>
+              <td className="py-2.5">Total ({linhasOrcamento.length})</td>
+              <td className="py-2.5 tabular-nums">{fmtBRL(totals.gasto)}</td>
+              <td className="py-2.5 tabular-nums">{fmtNum(totals.cliques)}</td>
+              <td className="py-2.5 tabular-nums">{fmtNum(totals.conversoes)}</td>
+              <td className="py-2.5 tabular-nums">{fmtBRL(totals.orcamentoMensal)}</td>
+              <td className={"py-2.5 tabular-nums " + (totals.saldoAtual >= 0 ? (dark ? "text-emerald-400" : "text-emerald-700") : (dark ? "text-red-400" : "text-red-700"))}>{fmtBRL(totals.saldoAtual)}</td>
+              <td className="py-2.5 tabular-nums">{fmtBRL(totals.orcamentoDiario)}</td>
+              <td className="py-2.5"></td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+      )}
+
+      <footer className={"text-center text-[11px] py-2 " + mutedText}>Raviera Cockpit · Google Ads · v{APP_VERSION}</footer>
+    </div>
+  );
+}
+
+/* ================================================================== */
+/* 7.1) FUNIL DE VENDAS (Lead → Proposta → Venda)                       */
+/* ================================================================== */
+
+function aggregateFunil(records) {
+  const base = records.reduce((acc, r) => { acc.leads += r.leads; acc.propostas += r.propostas; acc.vendas += r.vendas; return acc; }, { leads: 0, propostas: 0, vendas: 0 });
+  base.taxaLeadProposta = base.leads > 0 ? (base.propostas / base.leads) * 100 : 0;
+  base.taxaPropostaVenda = base.propostas > 0 ? (base.vendas / base.propostas) * 100 : 0;
+  base.taxaGeral = base.leads > 0 ? (base.vendas / base.leads) * 100 : 0;
+  return base;
+}
+function clampNum(v, min, max) { return Math.min(max, Math.max(min, v)); }
+const fmtPct1 = (v) => v.toFixed(1).replace(".", ",") + "%";
+
+// Arredonda os cantos de um polígono qualquer (usado nos trapézios do funil):
+// pra cada vértice, recua um pouco pelas duas arestas vizinhas e conecta com uma curva quadrática.
+function roundedPolygonPath(points, radius) {
+  const n = points.length;
+  const dist = (a, b) => Math.hypot(b[0] - a[0], b[1] - a[1]);
+  let d = "";
+  for (let i = 0; i < n; i++) {
+    const curr = points[i];
+    const prev = points[(i - 1 + n) % n];
+    const next = points[(i + 1) % n];
+    const len1 = dist(prev, curr) || 1;
+    const len2 = dist(curr, next) || 1;
+    const r = Math.min(radius, len1 / 2, len2 / 2);
+    const p1 = [curr[0] + (prev[0] - curr[0]) / len1 * r, curr[1] + (prev[1] - curr[1]) / len1 * r];
+    const p2 = [curr[0] + (next[0] - curr[0]) / len2 * r, curr[1] + (next[1] - curr[1]) / len2 * r];
+    d += (i === 0 ? `M ${p1[0]},${p1[1]} ` : `L ${p1[0]},${p1[1]} `) + `Q ${curr[0]},${curr[1]} ${p2[0]},${p2[1]} `;
+  }
+  return d + "Z";
+}
+function FunnelShape({ y0, y1, topHalf, bottomHalf, cx, fill, dark }) {
+  const points = [[cx - topHalf, y0], [cx + topHalf, y0], [cx + bottomHalf, y1], [cx - bottomHalf, y1]];
+  return (
+    <path d={roundedPolygonPath(points, 12)} fill={fill}
+      stroke={dark ? "rgba(255,255,255,0.10)" : "rgba(255,255,255,0.5)"} strokeWidth="1"
+      style={!dark ? { filter: "drop-shadow(0 10px 16px rgba(15,23,42,0.14))" } : undefined} />
+  );
+}
+function FunnelDiagram({ agg, dark }) {
+  const cx = 190, maxHalf = 150, stageH = 82, gap = 14, marginTop = 16, labelX = 372;
+  const s0y0 = marginTop, s0y1 = s0y0 + stageH;
+  const s1y0 = s0y1 + gap, s1y1 = s1y0 + stageH;
+  const s2y0 = s1y1 + gap, s2y1 = s2y0 + stageH;
+  const viewH = s2y1 + marginTop;
+
+  const propostasRatio = agg.leads > 0 ? agg.propostas / agg.leads : 0;
+  const vendasRatio = agg.leads > 0 ? agg.vendas / agg.leads : 0;
+  const w0 = maxHalf;
+  const w1 = clampNum(maxHalf * propostasRatio, 55, maxHalf);
+  const w2 = clampNum(Math.min(w1, maxHalf * vendasRatio), 38, w1);
+  const w3 = clampNum(w2 - 18, 26, w2);
+
+  const mid = (a, b) => (a + b) / 2;
+  const textMuted = dark ? "#9ca3af" : "#64748b";
+  const textStrong = dark ? "#e5e7eb" : "#334155";
+  const lineColor = dark ? "#404040" : "#cbd5e1";
+
+  return (
+    <svg viewBox={`0 0 500 ${viewH}`} className="w-full h-auto block" style={{ maxWidth: 460, margin: "0 auto" }}>
+      <defs>
+        <linearGradient id="funilGradLeads" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="#60a5fa" /><stop offset="100%" stopColor="#3b82f6" />
+        </linearGradient>
+        <linearGradient id="funilGradPropostas" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="#a78bfa" /><stop offset="100%" stopColor="#8b5cf6" />
+        </linearGradient>
+        <linearGradient id="funilGradVendas" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="#34d399" /><stop offset="100%" stopColor="#10b981" />
+        </linearGradient>
+      </defs>
+
+      <FunnelShape y0={s0y0} y1={s0y1} topHalf={w0} bottomHalf={w1} cx={cx} fill="url(#funilGradLeads)" dark={dark} />
+      <FunnelShape y0={s1y0} y1={s1y1} topHalf={w1} bottomHalf={w2} cx={cx} fill="url(#funilGradPropostas)" dark={dark} />
+      <FunnelShape y0={s2y0} y1={s2y1} topHalf={w2} bottomHalf={w3} cx={cx} fill="url(#funilGradVendas)" dark={dark} />
+
+      <text x={cx} y={mid(s0y0, s0y1) - 6} textAnchor="middle" fontSize="11" fontWeight="600" letterSpacing="0.5" fill="rgba(255,255,255,0.85)">LEADS</text>
+      <text x={cx} y={mid(s0y0, s0y1) + 19} textAnchor="middle" fontSize="23" fontWeight="700" fill="#fff">{fmtNum(agg.leads)}</text>
+
+      <text x={cx} y={mid(s1y0, s1y1) - 6} textAnchor="middle" fontSize="11" fontWeight="600" letterSpacing="0.5" fill="rgba(255,255,255,0.85)">PROPOSTAS</text>
+      <text x={cx} y={mid(s1y0, s1y1) + 19} textAnchor="middle" fontSize="23" fontWeight="700" fill="#fff">{fmtNum(agg.propostas)}</text>
+
+      <text x={cx} y={mid(s2y0, s2y1) - 6} textAnchor="middle" fontSize="11" fontWeight="600" letterSpacing="0.5" fill="rgba(255,255,255,0.85)">VENDAS</text>
+      <text x={cx} y={mid(s2y0, s2y1) + 19} textAnchor="middle" fontSize="23" fontWeight="700" fill="#fff">{fmtNum(agg.vendas)}</text>
+
+      <text x={labelX} y={mid(s0y0, s0y1)} dominantBaseline="middle" fontSize="12" fontWeight="600" fill={textStrong}>100% do total</text>
+
+      <line x1={cx + w1 + 6} y1={mid(s0y1, s1y0)} x2={labelX - 10} y2={mid(s0y1, s1y0)} stroke={lineColor} strokeWidth="1" />
+      <text x={labelX} y={mid(s0y1, s1y0)} dominantBaseline="middle" fontSize="11" fontWeight="600" fill={textMuted}>{fmtPct1(agg.taxaLeadProposta)} de conversão</text>
+
+      <text x={labelX} y={mid(s1y0, s1y1)} dominantBaseline="middle" fontSize="12" fontWeight="600" fill={textStrong}>{fmtPct1(agg.taxaLeadProposta)} do total</text>
+
+      <line x1={cx + w2 + 6} y1={mid(s1y1, s2y0)} x2={labelX - 10} y2={mid(s1y1, s2y0)} stroke={lineColor} strokeWidth="1" />
+      <text x={labelX} y={mid(s1y1, s2y0)} dominantBaseline="middle" fontSize="11" fontWeight="600" fill={textMuted}>{fmtPct1(agg.taxaPropostaVenda)} de conversão</text>
+
+      <text x={labelX} y={mid(s2y0, s2y1)} dominantBaseline="middle" fontSize="12" fontWeight="600" fill={textStrong}>{fmtPct1(agg.taxaGeral)} do total</text>
+    </svg>
+  );
+}
+
+function FunilVendasDashboard({ token, dark, cardBg, mutedText, pushToast, permissoes }) {
+  const [marcaFiltro, setMarcaFiltro] = useState("todas");
+  const [periodo, setPeriodo] = useState("mesAtual");
+  const [comparativoTipo, setComparativoTipo] = useState("mesAnterior");
+  const [customStart, setCustomStart] = useState("");
+  const [customEnd, setCustomEnd] = useState("");
+  const [dashboardData, setDashboardData] = useState({ brands: [], trafego: [], noticias: [], sacStats: [], meta: {} });
+  const [loading, setLoading] = useState(true);
+  const [syncing, setSyncing] = useState(false);
+  const [marcasExpanded, setMarcasExpanded] = useState(false);
+  const [noticiasExpanded, setNoticiasExpanded] = useState(false);
+
+  async function loadDashboard() {
+    setLoading(true);
+    try {
+      const data = await authJson("/api/dashboard/funil", token);
+      setDashboardData(data);
+    } catch (e) {
+      pushToast(e.message, "error");
+    } finally {
+      setLoading(false);
+    }
+  }
+  async function refreshData() {
+    setSyncing(true);
+    try {
+      await authJson("/api/sync", token, { method: "POST" });
+      await loadDashboard();
+    } catch (e) {
+      pushToast(e.message, "error");
+    } finally {
+      setSyncing(false);
+    }
+  }
+  useEffect(() => { loadDashboard(); }, []);
+
+  const brandsList = useMemo(() => dashboardData.brands.map((b) => b.nome).sort(), [dashboardData.brands]);
+  const brandsToShow = useMemo(() => (marcaFiltro === "todas" ? brandsList : [marcaFiltro]), [marcaFiltro, brandsList]);
+
+  const range = useMemo(() => getPeriodRange(periodo, customStart, customEnd), [periodo, customStart, customEnd]);
+  const prevRange = useMemo(
+    () => (periodo === "comparativo" ? getComparativoRange(range, comparativoTipo) : getPreviousRange(range)),
+    [range, periodo, comparativoTipo]
+  );
+
+  const scopedTrafego = useMemo(() => dashboardData.trafego.filter((r) => brandsToShow.includes(r.marca)), [dashboardData.trafego, brandsToShow]);
+  const currentRecords = useMemo(() => filterByRange(scopedTrafego, range), [scopedTrafego, range]);
+  const previousRecords = useMemo(() => filterByRange(scopedTrafego, prevRange), [scopedTrafego, prevRange]);
+
+  const currentAgg = useMemo(() => aggregateFunil(currentRecords), [currentRecords]);
+  const previousAgg = useMemo(() => aggregateFunil(previousRecords), [previousRecords]);
+
+  const linhasPorMarca = useMemo(() => {
+    return brandsToShow.map((marca) => {
+      const recs = filterByRange(dashboardData.trafego.filter((r) => r.marca === marca), range);
+      const agg = aggregateFunil(recs);
+      return { marca, ...agg };
+    });
+  }, [brandsToShow, dashboardData.trafego, range]);
+  const MARCAS_PREVIEW_COUNT = 5;
+  const linhasPorMarcaToRender = marcasExpanded ? linhasPorMarca : linhasPorMarca.slice(0, MARCAS_PREVIEW_COUNT);
+  const hasMoreMarcas = linhasPorMarca.length > MARCAS_PREVIEW_COUNT;
+
+  const sacScoped = useMemo(() => dashboardData.sacStats.filter((r) => brandsToShow.includes(r.marca)), [dashboardData.sacStats, brandsToShow]);
+  const sacAtual = useMemo(() => filterByRange(sacScoped, range), [sacScoped, range]);
+  const sacStats = useMemo(() => {
+    const base = sacAtual.reduce((acc, r) => {
+      acc.recebidas += r.recebidas;
+      acc.respondidas += r.respondidas;
+      acc.somaTempo += r.tempoRespostaMin;
+      acc.qtd += 1;
+      return acc;
+    }, { recebidas: 0, respondidas: 0, somaTempo: 0, qtd: 0 });
+    base.taxaResposta = base.recebidas > 0 ? (base.respondidas / base.recebidas) * 100 : 0;
+    base.tempoMedioMin = base.qtd > 0 ? base.somaTempo / base.qtd : 0;
+    return base;
+  }, [sacAtual]);
+
+  const noticiasToShow = useMemo(() => dashboardData.noticias.filter((n) => brandsToShow.includes(n.marca)), [dashboardData.noticias, brandsToShow]);
+  const NOTICIAS_PREVIEW_COUNT = 3;
+  const noticiasToRender = noticiasExpanded ? noticiasToShow : noticiasToShow.slice(0, NOTICIAS_PREVIEW_COUNT);
+  const hasMoreNoticias = noticiasToShow.length > NOTICIAS_PREVIEW_COUNT;
+
+  useEffect(() => { setMarcasExpanded(false); setNoticiasExpanded(false); }, [brandsToShow]);
+
+  const previousLabel = comparativoTipo === "anoAnterior" ? "mesmo mês " + prevRange.start.getFullYear() : "mês anterior";
+
+  return (
+    <div className="flex flex-col gap-6">
+      {dashboardData.meta.demoMode && (
+        <div className={"rounded-lg border px-3 py-2 flex items-center gap-2 text-xs " + (dark ? "bg-amber-500/5 border-amber-500/20 text-amber-400" : "bg-amber-50 border-amber-200 text-amber-700")}>
+          <IconRefresh className="h-3.5 w-3.5 shrink-0" />
+          Leads são reais (Meta Ads). Propostas e Vendas estão em modo de demonstração — a API do NBS ainda não foi integrada.
+        </div>
+      )}
+
+      {syncing && (
+        <div className={"rounded-lg border px-3 py-2 flex items-center gap-2 text-xs " + (dark ? "bg-blue-500/5 border-blue-500/20 text-blue-400" : "bg-blue-50 border-blue-200 text-blue-700")}>
+          <IconRefresh className="h-3.5 w-3.5 shrink-0 animate-spin" />
+          Sincronizando dados — pode levar alguns minutos. Não clique de novo nem feche esta aba.
+        </div>
+      )}
+
+      <div className={"rounded-xl border p-3 flex flex-wrap items-center gap-3 " + cardBg}>
+        <div className="flex items-center gap-1.5"><IconCalendar className={"h-4 w-4 " + mutedText} /><span className={"text-xs font-medium " + mutedText}>Período:</span></div>
+        <div className="flex flex-wrap gap-1">
+          {[{ id: "mesAtual", label: "Mês Atual" }, { id: "mesAnterior", label: "Mês Anterior" }, { id: "comparativo", label: "Comparativo" }, { id: "custom", label: "Customizado" }].map((p) => (
+            <button key={p.id} onClick={() => setPeriodo(p.id)} className={"px-3 py-1.5 rounded-md text-xs font-semibold transition-colors " + (periodo === p.id ? "bg-blue-600 text-white" : (dark ? "bg-neutral-800 text-neutral-300 hover:bg-neutral-700" : "bg-neutral-100 text-neutral-600 hover:bg-neutral-200"))}>{p.label}</button>
+          ))}
+        </div>
+        <span className={"text-xs " + mutedText}>
+          {range.start.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" })} – {range.end.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" })}
+        </span>
+        {periodo === "comparativo" && (
+          <div className="w-full flex flex-wrap items-center gap-3">
+            <span className={"text-xs font-medium " + mutedText}>Comparar com:</span>
+            <div className="flex flex-wrap gap-1">
+              {[{ id: "mesAnterior", label: "Mês Anterior" }, { id: "anoAnterior", label: "Mesmo Mês Ano Passado" }].map((c) => (
+                <button key={c.id} onClick={() => setComparativoTipo(c.id)} className={"px-3 py-1.5 rounded-md text-xs font-semibold transition-colors " + (comparativoTipo === c.id ? "bg-blue-600 text-white" : (dark ? "bg-neutral-800 text-neutral-300 hover:bg-neutral-700" : "bg-neutral-100 text-neutral-600 hover:bg-neutral-200"))}>{c.label}</button>
+              ))}
+            </div>
+            <span className={"text-xs " + mutedText}>
+              vs {prevRange.start.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric" })} – {prevRange.end.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric" })}
+            </span>
+          </div>
+        )}
+        {periodo === "custom" && (
+          <div className="flex items-center gap-2">
+            <input type="date" value={customStart} onChange={(e) => setCustomStart(e.target.value)} className={"px-2 py-1.5 rounded-md border text-xs " + (dark ? "bg-neutral-800 border-neutral-700 text-neutral-100" : "bg-white border-neutral-200")} />
+            <span className={"text-xs " + mutedText}>até</span>
+            <input type="date" value={customEnd} onChange={(e) => setCustomEnd(e.target.value)} className={"px-2 py-1.5 rounded-md border text-xs " + (dark ? "bg-neutral-800 border-neutral-700 text-neutral-100" : "bg-white border-neutral-200")} />
+          </div>
+        )}
+        <div className="flex items-center gap-3 ml-auto">
+          <div className="flex items-center gap-1.5 text-xs">
+            <span className={mutedText}>{fmtAtualizado(dashboardData.meta.lastSync)}</span>
+            <button onClick={refreshData} disabled={loading || syncing} aria-label="Atualizar dados"
+              className={"h-7 w-7 flex items-center justify-center rounded-md border disabled:opacity-50 " + (dark ? "bg-neutral-800 border-neutral-700" : "bg-neutral-100 border-neutral-200")}>
+              <IconRefresh className={"h-3.5 w-3.5 " + mutedText + (loading || syncing ? " animate-spin" : "")} />
+            </button>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <IconBuilding className={"h-4 w-4 " + mutedText} />
+            <div className="relative">
+              <select value={marcaFiltro} onChange={(e) => setMarcaFiltro(e.target.value)} className={"appearance-none pl-3 pr-8 py-1.5 rounded-md border text-xs font-semibold cursor-pointer " + (dark ? "bg-neutral-800 border-neutral-700 text-neutral-100" : "bg-white border-neutral-200 text-neutral-900")}>
+                <option value="todas">Todas as Marcas</option>
+                {brandsList.map((m) => <option key={m} value={m}>{m}</option>)}
+              </select>
+              <IconChevronDown className={"h-3.5 w-3.5 absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none " + mutedText} />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <KpiCard IconComp={IconUsers} label="Leads" value={fmtNum(currentAgg.leads)} badgeValue={variacao(currentAgg.leads, previousAgg.leads)} previousValue={periodo === "comparativo" ? fmtNum(previousAgg.leads) : undefined} previousLabel={previousLabel} dark={dark} accent="#3b82f6" />
+        <KpiCard IconComp={IconTarget} label="Propostas" value={fmtNum(currentAgg.propostas)} badgeValue={variacao(currentAgg.propostas, previousAgg.propostas)} previousValue={periodo === "comparativo" ? fmtNum(previousAgg.propostas) : undefined} previousLabel={previousLabel} dark={dark} accent="#8b5cf6" />
+        <KpiCard IconComp={IconCheck} label="Vendas" value={fmtNum(currentAgg.vendas)} badgeValue={variacao(currentAgg.vendas, previousAgg.vendas)} previousValue={periodo === "comparativo" ? fmtNum(previousAgg.vendas) : undefined} previousLabel={previousLabel} dark={dark} accent="#10b981" />
+        <KpiCard IconComp={IconGauge} label="Taxa de Conversão" value={currentAgg.taxaGeral.toFixed(1).replace(".", ",") + "%"} badgeValue={variacao(currentAgg.taxaGeral, previousAgg.taxaGeral)} previousValue={periodo === "comparativo" ? previousAgg.taxaGeral.toFixed(1).replace(".", ",") + "%" : undefined} previousLabel={previousLabel} dark={dark} accent="#f59e0b" />
+      </div>
+
+      <div className={"rounded-xl border p-6 " + cardBg}>
+        <h2 className="text-sm font-bold mb-1 text-center">Funil de Vendas — Visão Geral</h2>
+        <p className={"text-xs mb-5 text-center " + mutedText}>Lead (Meta Ads) → Proposta → Venda, no período selecionado</p>
+        <FunnelDiagram agg={currentAgg} dark={dark} />
+      </div>
+
+      <div className={"rounded-xl border p-4 overflow-x-auto " + cardBg}>
+        <h2 className="text-sm font-bold mb-1">Funil por Marca</h2>
+        <p className={"text-xs mb-4 " + mutedText}>Taxas de conversão de cada etapa, por marca, no período selecionado</p>
+        <table className="w-full text-sm min-w-[680px]">
+          <thead><tr className={"text-left text-xs uppercase tracking-wide " + mutedText}>
+            <th className="pb-2">Marca</th>
+            <th className="pb-2">Leads</th>
+            <th className="pb-2">Propostas</th>
+            <th className="pb-2">Vendas</th>
+            <th className="pb-2">Lead → Proposta</th>
+            <th className="pb-2">Proposta → Venda</th>
+            <th className="pb-2">Taxa Geral</th>
+          </tr></thead>
+          <tbody className={"divide-y " + (dark ? "divide-neutral-800" : "divide-neutral-100")}>
+            {linhasPorMarcaToRender.map((row) => (
+              <tr key={row.marca}>
+                <td className="py-2.5 font-semibold">{row.marca}</td>
+                <td className="py-2.5 tabular-nums">{fmtNum(row.leads)}</td>
+                <td className="py-2.5 tabular-nums">{fmtNum(row.propostas)}</td>
+                <td className="py-2.5 tabular-nums">{fmtNum(row.vendas)}</td>
+                <td className="py-2.5 tabular-nums">{row.taxaLeadProposta.toFixed(1).replace(".", ",")}%</td>
+                <td className="py-2.5 tabular-nums">{row.taxaPropostaVenda.toFixed(1).replace(".", ",")}%</td>
+                <td className="py-2.5 tabular-nums font-semibold">{row.taxaGeral.toFixed(1).replace(".", ",")}%</td>
+              </tr>
+            ))}
+          </tbody>
+          <tfoot>
+            <tr className={"border-t font-semibold " + (dark ? "border-neutral-800" : "border-neutral-200")}>
+              <td className="py-2.5">Total ({linhasPorMarca.length})</td>
+              <td className="py-2.5 tabular-nums">{fmtNum(currentAgg.leads)}</td>
+              <td className="py-2.5 tabular-nums">{fmtNum(currentAgg.propostas)}</td>
+              <td className="py-2.5 tabular-nums">{fmtNum(currentAgg.vendas)}</td>
+              <td className="py-2.5 tabular-nums">{currentAgg.taxaLeadProposta.toFixed(1).replace(".", ",")}%</td>
+              <td className="py-2.5 tabular-nums">{currentAgg.taxaPropostaVenda.toFixed(1).replace(".", ",")}%</td>
+              <td className="py-2.5 tabular-nums">{currentAgg.taxaGeral.toFixed(1).replace(".", ",")}%</td>
+            </tr>
+          </tfoot>
+        </table>
+        {hasMoreMarcas && (
+          <button onClick={() => setMarcasExpanded((v) => !v)}
+            className={"mt-4 w-full flex items-center justify-center gap-1.5 py-2 rounded-md text-xs font-semibold border transition-colors " +
+              (dark ? "bg-neutral-800 border-neutral-700 text-neutral-200 hover:bg-neutral-700" : "bg-neutral-100 border-neutral-200 text-neutral-700 hover:bg-neutral-200")}>
+            {marcasExpanded ? "Ver menos" : "Ver todas (" + linhasPorMarca.length + ")"}
+            <IconChevronDown className={"h-3.5 w-3.5 transition-transform" + (marcasExpanded ? " rotate-180" : "")} />
+          </button>
+        )}
+      </div>
+
+      <div className={"rounded-xl border p-4 " + cardBg}>
+        <h2 className="text-sm font-bold mb-1 flex items-center gap-1.5">💬 Estatísticas de Respostas SAC</h2>
+        <p className={"text-xs mb-3 " + mutedText}>Mensagens do Instagram e Facebook no período selecionado — dados de demonstração, aguardando permissão do Meta pra mensagens</p>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <KpiCard IconComp={IconUsers} label="Recebidas" value={fmtNum(sacStats.recebidas)} dark={dark} accent="#3b82f6" />
+          <KpiCard IconComp={IconCheck} label="Respondidas" value={fmtNum(sacStats.respondidas)} dark={dark} accent="#10b981" />
+          <KpiCard IconComp={IconTarget} label="Taxa de Resposta" value={sacStats.taxaResposta.toFixed(1).replace(".", ",") + "%"} dark={dark} accent="#8b5cf6" />
+          <KpiCard IconComp={IconGauge} label="Tempo Médio de Resposta" value={fmtNum(sacStats.tempoMedioMin) + " min"} dark={dark} accent="#f59e0b" />
+        </div>
+      </div>
+
+      {permissoes.verNoticias && noticiasToShow.length > 0 && (
+        <div className={"rounded-xl border p-4 " + (marcaFiltro !== "todas" ? "overflow-hidden " : "") + cardBg}>
+          <h2 className="text-sm font-bold mb-1 flex items-center gap-1.5"><IconSparkle className="h-4 w-4 text-amber-500" /> Notícias do Setor</h2>
+          <p className={"text-xs mb-3 " + mutedText}>Manchetes recentes de portais automotivos (Quatro Rodas, Motor1, AutoPapo) que citam as marcas do grupo — atualiza sozinho às 08h e 15h, ou ao clicar em "Atualizar"</p>
+          {marcaFiltro !== "todas" ? (
+            <NewsCarousel itens={(noticiasToShow[0] || {}).itens || []} dark={dark} mutedText={mutedText} />
+          ) : (
+            <>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                {noticiasToRender.map((item) => (
+                  <NewsBrandGroup key={item.brandId} item={item} dark={dark} mutedText={mutedText} />
+                ))}
+              </div>
+              {hasMoreNoticias && (
+                <button onClick={() => setNoticiasExpanded((v) => !v)}
+                  className={"mt-4 w-full flex items-center justify-center gap-1.5 py-2 rounded-md text-xs font-semibold border transition-colors " +
+                    (dark ? "bg-neutral-800 border-neutral-700 text-neutral-200 hover:bg-neutral-700" : "bg-neutral-100 border-neutral-200 text-neutral-700 hover:bg-neutral-200")}>
+                  {noticiasExpanded ? "Ver menos" : "Ver todas (" + noticiasToShow.length + ")"}
+                  <IconChevronDown className={"h-3.5 w-3.5 transition-transform" + (noticiasExpanded ? " rotate-180" : "")} />
+                </button>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
+      <footer className={"text-center text-[11px] py-2 " + mutedText}>Raviera Cockpit · Informações Gerais · v{APP_VERSION}</footer>
+    </div>
+  );
+}
+
+/* ================================================================== */
+/* 7.2) ASSISTENTE DO PAINEL (chat flutuante com respostas por gatilho)  */
+/* ================================================================== */
+
+// Banco de perguntas frequentes: cada entrada tem gatilhos (palavras/frases que a pergunta
+// da pessoa precisa conter) e a resposta pronta. Não usa IA — é busca por palavra-chave.
+const FAQ_BASE = [
+  {
+    id: "comparativo",
+    gatilhos: ["comparativo", "comparar", "mes anterior", "ano passado", "comparacao"],
+    resposta: 'Clique em "Comparativo" na barra de período. Vai aparecer um segundo seletor pra escolher entre "Mês Anterior" ou "Mesmo Mês Ano Passado" — o painel compara o mesmo intervalo de dias nos dois períodos (ex: dia 1 a 28 nos dois) pra a porcentagem não ficar distorcida.',
+  },
+  {
+    id: "filtro_marca",
+    gatilhos: ["filtrar marca", "marca especifica", "so uma marca", "filtro de marca", "ver so uma marca"],
+    resposta: 'Use o seletor "Todas as Marcas" no canto direito da barra de período — escolha uma marca específica pra ver só os dados dela, ou deixe em "Todas as Marcas" pra ver o agregado do grupo todo.',
+  },
+  {
+    id: "sincronizar",
+    gatilhos: ["sincronizar", "atualizar dados", "dados desatualizados", "puxar dados novos", "atualizar o painel"],
+    resposta: 'Clique no ícone de atualizar (a setinha circular) ao lado de "Atualizado às...", na barra de período. Isso busca os dados mais recentes do Meta e do Google Ads — pode levar alguns minutos, então evite clicar de novo enquanto estiver sincronizando.',
+  },
+  {
+    id: "saldo_meta",
+    gatilhos: ["saldo meta", "runway", "saldo critico", "saldo baixo", "saldo da conta", "saldo de anuncio"],
+    resposta: 'Na tabela "Saldo das Contas de Anúncios (Meta Ads)", a coluna Runway mostra quantos dias o saldo atual ainda cobre, considerando o gasto diário esperado. Status: Crítico (≤3 dias), Atenção (≤7 dias) ou Saldo OK.',
+  },
+  {
+    id: "saldo_google",
+    gatilhos: ["saldo google", "orcamento mensal", "saldo atual google", "saldo do google"],
+    resposta: "No Google Ads, o Saldo Atual é o Orçamento Mensal configurado pra marca (em Configuração → Marcas) menos o quanto já foi gasto no mês. Se ficar negativo, é porque o orçamento mensal está zerado ou o gasto já passou dele.",
+  },
+  {
+    id: "funil",
+    gatilhos: ["funil de vendas", "lead proposta venda", "taxa de conversao", "funil", "propostas e vendas", "informacoes gerais"],
+    resposta: 'A aba "Informações Gerais" traz o Funil de Vendas (Leads reais do Meta Ads, Propostas e Vendas ainda em modo demonstração até integrarmos o Followize), as Estatísticas de Respostas SAC e as Notícias do Setor, tudo numa página só.',
+  },
+  {
+    id: "palavras_chave",
+    gatilhos: ["palavra chave", "palavras-chave", "palavras chave", "impacto das palavras", "keyword"],
+    resposta: 'Na aba Google Ads, o card "Impacto das Palavras-Chave por Marca" mostra as palavras-chave com mais conversões de cada marca. Clique em "Ver todas" pra expandir a lista completa.',
+  },
+  {
+    id: "mapa_calor",
+    gatilhos: ["mapa de calor", "localidade", "cidade", "onde os cliques", "onde as pessoas"],
+    resposta: 'O "Mapa de Calor por Localidade", na aba Google Ads, mostra as cidades onde as pessoas estavam ao clicar/converter nos anúncios, ordenadas por intensidade de conversão.',
+  },
+  {
+    id: "trocar_dashboard",
+    gatilhos: ["trocar dashboard", "mudar de aba", "outro dashboard", "menu"],
+    resposta: 'Use o botão no topo (que mostra "Meta Ads", "Google Ads" ou "Informações Gerais") — clique nele pra abrir o menu e escolher qual dashboard ver.',
+  },
+  {
+    id: "tema",
+    gatilhos: ["tema escuro", "modo escuro", "tema claro", "trocar tema", "modo claro"],
+    resposta: "Clique no ícone de sol/lua no canto superior direito pra alternar entre tema claro e escuro.",
+  },
+  {
+    id: "filtro_equipe",
+    gatilhos: ["campanhas do felipe", "campanhas do rena", "analista", "equipe"],
+    resposta: 'O filtro por equipe/analista foi removido — cada usuário já vê só as marcas atribuídas a ele (em Configuração → Usuários). Use o seletor "Todas as Marcas" / marca específica pra filtrar o que aparece no painel.',
+  },
+  {
+    id: "adicionar_marca",
+    gatilhos: ["adicionar marca", "criar marca", "nova marca", "cadastrar marca"],
+    resposta: 'Vá em Configuração → seção "Marcas" (só admin vê essa área). Preencha nome, conta de anúncio, analista responsável e o resto dos campos, e clique em "Adicionar marca".',
+  },
+  {
+    id: "adicionar_usuario",
+    gatilhos: ["adicionar usuario", "criar usuario", "novo usuario", "dar acesso", "cadastrar vendedor", "permissao de acesso"],
+    resposta: 'Vá em Configuração → seção "Usuários" (só admin vê essa área). Ao criar um usuário "Gerente", marque quais marcas ele pode ver — só admins enxergam todas as marcas automaticamente.',
+  },
+  {
+    id: "esqueci_senha",
+    gatilhos: ["esqueci a senha", "esqueci minha senha", "recuperar senha", "trocar senha", "redefinir senha"],
+    resposta: "Não existe recuperação automática de senha ainda — peça pra um admin ir em Configuração → Usuários e definir uma senha nova pra sua conta.",
+  },
+  {
+    id: "modo_demonstracao",
+    gatilhos: ["modo demonstracao", "dados de demonstracao", "dados fake", "dados nao sao reais"],
+    resposta: "O aviso amarelo de \"modo demonstração\" aparece quando as credenciais daquela integração (Google Ads, NBS etc.) ainda não foram configuradas no servidor — os números mostrados são gerados só pra preencher o layout, não são reais.",
+  },
+  {
+    id: "logo_empresa",
+    gatilhos: ["trocar logo", "colocar logo", "logo da empresa", "mudar o logo"],
+    resposta: 'Clique no ícone de engrenagem (Aparência), no canto superior direito, e use "Alterar logo" pra subir a imagem da sua empresa.',
+  },
+  {
+    id: "top_criativos",
+    gatilhos: ["melhor anuncio", "top criativos", "melhores criativos", "ranking de anuncios", "qual anuncio performou melhor"],
+    resposta: 'O card "Top 3 Melhores Anúncios por Marca", no dashboard Meta Ads, mostra os 3 criativos com mais leads de cada marca no período selecionado (muda se você trocar pra Mês Anterior, por exemplo), com investimento e custo por lead. Clique em "Ver todas" pra ver todas as marcas.',
+  },
+  {
+    id: "alcance_organico",
+    gatilhos: ["alcance organico", "seguidores instagram", "post instagram", "instagram organico"],
+    resposta: 'O card "Alcance Orgânico no Instagram" mostra, por conta, o total de seguidores, quantos foram ganhos no período e o post com mais curtidas — não tem relação com tráfego pago, é conteúdo orgânico.',
+  },
+  {
+    id: "cpl_cpa",
+    gatilhos: ["o que e cpl", "o que e cpa", "custo por lead", "custo por conversao"],
+    resposta: "CPL (Meta Ads) é o custo por lead: investimento dividido pela quantidade de leads. CPA (Google Ads) é o custo por conversão. Quanto menor, mais barato está saindo cada lead/conversão.",
+  },
+  {
+    id: "ordenar_tabela_saldo",
+    gatilhos: ["ordenar tabela", "ordenar saldo", "classificar tabela"],
+    resposta: 'Na tabela "Saldo das Contas de Anúncios", clique no nome de qualquer coluna (Investimento, CPL, Runway, etc.) pra ordenar por ela — clique de novo pra inverter a ordem.',
+  },
+  {
+    id: "filtro_campanha_marca",
+    gatilhos: ["filtro de campanha", "conta compartilhada", "duas marcas mesma conta"],
+    resposta: 'Quando duas marcas usam a mesma conta de anúncio do Meta, o "Filtro de campanha" (em Configuração → Marcas) separa os dados: só campanhas cujo nome começa com esse prefixo contam pra aquela marca.',
+  },
+  {
+    id: "noticias_setor",
+    gatilhos: ["noticias do setor", "noticias por marca", "insights", "manchetes"],
+    resposta: 'O card "Notícias do Setor" aparece tanto no dashboard Meta Ads quanto em Informações Gerais, com manchetes recentes de portais automotivos (Quatro Rodas, Motor1, AutoPapo) que citam as marcas do grupo. Atualiza sozinho às 08h e 15h, além de quando você clica em "Atualizar dados". Por enquanto é só a manchete e o link, sem resumo — isso pode evoluir quando conectarmos uma IA de verdade.',
+  },
+  {
+    id: "sac_estatisticas",
+    gatilhos: ["estatisticas sac", "sac", "mensagens instagram", "mensagens facebook", "tempo de resposta"],
+    resposta: 'O quadro "Estatísticas de Respostas SAC", na aba Informações Gerais, mostra mensagens recebidas/respondidas e tempo médio de resposta no Instagram e Facebook. Ainda é modo demonstração — ler mensagens de verdade exige uma permissão nova do Meta que ainda não foi aprovada.',
+  },
+];
+
+function normalizeTexto(s) {
+  return s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^\w\s]/g, " ");
+}
+function buscarRespostaFaq(pergunta) {
+  // Cada gatilho "casa" se todas as suas palavras aparecem em algum lugar da pergunta,
+  // não precisa ser a frase exata na mesma ordem (ex: "usuário novo" também bate com "novo usuário").
+  const texto = normalizeTexto(pergunta);
+  let melhor = null;
+  let melhorPontos = 0;
+  for (const item of FAQ_BASE) {
+    for (const gatilho of item.gatilhos) {
+      const palavras = normalizeTexto(gatilho).split(/\s+/).filter(Boolean);
+      const matches = palavras.filter((p) => texto.includes(p)).length;
+      if (matches === palavras.length && matches > melhorPontos) {
+        melhor = item;
+        melhorPontos = matches;
+      }
+    }
+  }
+  return melhor ? melhor.resposta : null;
+}
+const FAQ_FALLBACK = 'Ainda não tenho uma resposta pronta pra isso. Pode perguntar coisas como: "como fazer um comparativo?", "o que é o funil de vendas?", "como funciona o saldo do Google Ads?" ou "como sincronizar os dados?".';
+
+function ChatWidget({ dark }) {
+  const [open, setOpen] = useState(false);
+  const [messages, setMessages] = useState([
+    { role: "assistant", text: 'Oi! Posso tirar dúvidas sobre como usar o painel — pergunte algo como "como fazer um comparativo?" ou "o que é o funil de vendas?".' },
+  ]);
+  const [input, setInput] = useState("");
+  const [sending, setSending] = useState(false);
+  const scrollRef = useRef(null);
+
+  useEffect(() => {
+    if (open && scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+  }, [messages, open]);
+
+  function handleSend() {
+    const text = input.trim();
+    if (!text || sending) return;
+    setMessages((m) => [...m, { role: "user", text }]);
+    setInput("");
+    setSending(true);
+    const resposta = buscarRespostaFaq(text) || FAQ_FALLBACK;
+    setTimeout(() => {
+      setMessages((m) => [...m, { role: "assistant", text: resposta }]);
+      setSending(false);
+    }, 500);
+  }
+
+  return (
+    <>
+      <button onClick={() => setOpen((v) => !v)} aria-label={open ? "Fechar assistente" : "Abrir assistente"}
+        className={"fixed bottom-5 right-5 z-40 h-14 w-14 rounded-2xl flex items-center justify-center shadow-lg shadow-blue-600/30 transition-transform hover:scale-105 " +
+          (open ? (dark ? "bg-neutral-800 border border-neutral-700" : "bg-white border border-neutral-200") : "bg-blue-600")}>
+        {open ? <IconX className={"h-5 w-5 " + (dark ? "text-neutral-200" : "text-neutral-700")} /> : <IconSparkle className="h-6 w-6 text-white" />}
+      </button>
+
+      {open && (
+        <div className={"fixed bottom-24 right-5 z-40 w-[340px] max-w-[calc(100vw-2.5rem)] h-[460px] max-h-[70vh] rounded-2xl border shadow-2xl flex flex-col overflow-hidden " +
+          (dark ? "bg-neutral-900 border-neutral-800" : "bg-white border-neutral-200")}>
+          <div className={"px-4 py-3 border-b flex items-center gap-2 " + (dark ? "border-neutral-800" : "border-neutral-200")}>
+            <div className="h-8 w-8 rounded-lg bg-blue-600 flex items-center justify-center shrink-0">
+              <IconSparkle className="h-4 w-4 text-white" />
+            </div>
+            <div className="min-w-0">
+              <p className="text-sm font-bold leading-tight">Assistente do Painel</p>
+              <p className={"text-[11px] " + (dark ? "text-neutral-500" : "text-neutral-400")}>Tira dúvidas sobre o painel</p>
+            </div>
+          </div>
+
+          <div ref={scrollRef} className="flex-1 overflow-y-auto px-3 py-3 flex flex-col gap-2">
+            {messages.map((m, i) => (
+              <div key={i} className={"max-w-[85%] rounded-xl px-3 py-2 text-sm leading-snug " +
+                (m.role === "user"
+                  ? "self-end bg-blue-600 text-white"
+                  : (dark ? "self-start bg-neutral-800 text-neutral-200" : "self-start bg-neutral-100 text-neutral-700"))}>
+                {m.text}
+              </div>
+            ))}
+            {sending && (
+              <div className={"self-start rounded-xl px-3 py-2 text-sm " + (dark ? "bg-neutral-800 text-neutral-400" : "bg-neutral-100 text-neutral-400")}>
+                digitando…
+              </div>
+            )}
+          </div>
+
+          <div className={"p-2.5 border-t flex items-center gap-2 " + (dark ? "border-neutral-800" : "border-neutral-200")}>
+            <input value={input} onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") handleSend(); }}
+              placeholder="Pergunte algo sobre o painel..."
+              className={"flex-1 px-3 py-2 rounded-lg border text-sm outline-none " +
+                (dark ? "bg-neutral-800 border-neutral-700 text-neutral-100 placeholder:text-neutral-500" : "bg-neutral-50 border-neutral-200 text-neutral-900 placeholder:text-neutral-400")} />
+            <button onClick={handleSend} disabled={!input.trim() || sending} aria-label="Enviar"
+              className="h-9 w-9 shrink-0 rounded-lg bg-blue-600 text-white flex items-center justify-center disabled:opacity-40">
+              <IconSend className="h-4 w-4" />
+            </button>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+/* ================================================================== */
+/* 8) DASHBOARD PRINCIPAL                                               */
+/* ================================================================== */
+
+function RavieraDashboard({ token, role, email, nome, permissoes, justLoggedIn, onLogout }) {
+  const [showWelcome, setShowWelcome] = useState(justLoggedIn);
+  useEffect(() => {
+    if (!justLoggedIn) return;
+    const t = setTimeout(() => setShowWelcome(false), 2200);
+    return () => clearTimeout(t);
+  }, [justLoggedIn]);
+  const [dark, setDark] = useState(() => localStorage.getItem("raviera_theme") !== "light");
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [view, setView] = useState("dashboard"); // "dashboard" (Meta) | "google" | "funil" | "config"
+  const [dashboardMenuOpen, setDashboardMenuOpen] = useState(false);
+  const [marcaFiltro, setMarcaFiltro] = useState("todas");
+  const [periodo, setPeriodo] = useState("mesAtual");
+  const [comparativoTipo, setComparativoTipo] = useState("mesAnterior");
+  const [customStart, setCustomStart] = useState("");
+  const [customEnd, setCustomEnd] = useState("");
+  const [sortConfig, setSortConfig] = useState({ key: "status", dir: "asc" });
+
+  const [dashboardData, setDashboardData] = useState({ brands: [], trafego: [], saldos: [], criativosDiarios: [], organico: [], noticias: [], meta: {} });
+  const [loading, setLoading] = useState(true);
+  const [syncing, setSyncing] = useState(false);
+  const [toasts, setToasts] = useState([]);
+  const [selectedCreative, setSelectedCreative] = useState(null);
+
+  function pushToast(message, type) {
+    const id = Date.now() + Math.random();
+    setToasts((prev) => [...prev, { id, message, type: type || "error" }]);
+    setTimeout(() => setToasts((prev) => prev.map((t) => (t.id === id ? { ...t, leaving: true } : t))), 3700);
+    setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 4000);
+  }
+
+  useEffect(() => { localStorage.setItem("raviera_theme", dark ? "dark" : "light"); }, [dark]);
+
+  async function loadDashboard() {
+    setLoading(true);
+    try {
+      const data = await authJson("/api/dashboard", token);
+      setDashboardData(data);
+    } catch (e) {
+      pushToast(e.message, "error");
+    } finally {
+      setLoading(false);
+    }
+  }
+  async function refreshData() {
+    setSyncing(true);
+    try {
+      const result = await authJson("/api/sync", token, { method: "POST" });
+      await loadDashboard();
+      pushToast(`Dados atualizados — ${result.contas_sincronizadas} contas do Meta sincronizadas`, "success");
+    } catch (e) {
+      pushToast(e.message, "error");
+    } finally {
+      setSyncing(false);
+    }
+  }
+  useEffect(() => { loadDashboard(); }, []);
+
+  const brandsList = useMemo(
+    () => dashboardData.brands.map((b) => b.nome).sort(),
+    [dashboardData.brands]
+  );
+  const brandsToShow = useMemo(() => (marcaFiltro === "todas" ? brandsList : [marcaFiltro]), [marcaFiltro, brandsList]);
+
+  const range = useMemo(() => getPeriodRange(periodo, customStart, customEnd), [periodo, customStart, customEnd]);
+  const prevRange = useMemo(
+    () => (periodo === "comparativo" ? getComparativoRange(range, comparativoTipo) : getPreviousRange(range)),
+    [range, periodo, comparativoTipo]
+  );
 
   const scopedTrafego = useMemo(() => dashboardData.trafego.filter((r) => brandsToShow.includes(r.marca)), [dashboardData.trafego, brandsToShow]);
   const currentRecords = useMemo(() => filterByRange(scopedTrafego, range), [scopedTrafego, range]);
@@ -665,7 +2103,7 @@ function RavieraDashboard({ token, role, email, onLogout }) {
       if (!byDate[r.data]) byDate[r.data] = { data: r.data, gasto: 0, quantidade: 0 };
       byDate[r.data].gasto += r.gasto; byDate[r.data].quantidade += r.quantidade;
     });
-    return Object.values(byDate).sort((a, b) => a.data.localeCompare(b.data)).map((d) => ({ ...d, dataLabel: fmtDateShort(d.data) }));
+    return Object.values(byDate).sort((a, b) => a.data.localeCompare(b.data)).map((d) => ({ ...d, dataLabel: fmtDateOnly(d.data) }));
   }, [currentRecords]);
 
   const rankingMarcas = useMemo(() => {
@@ -715,68 +2153,138 @@ function RavieraDashboard({ token, role, email, onLogout }) {
     return t;
   }, [linhasSaldo]);
 
-  const topCreativesToShow = useMemo(
-    () => dashboardData.topCreatives.filter((c) => brandsToShow.includes(c.marca)),
-    [dashboardData.topCreatives, brandsToShow]
+  // Recalcula o top 3 de criativos a partir do histórico diário por anúncio, filtrado pelo
+  // MESMO período selecionado no topo da tela (Mês Atual, Mês Anterior, período customizado
+  // etc.) — igual já fazemos com leads/gasto. Não existe mais um "top 3" fixo do backend.
+  const topCreativesToShow = useMemo(() => {
+    const filtrados = filterByRange(
+      dashboardData.criativosDiarios.filter((c) => brandsToShow.includes(c.marca)),
+      range
+    );
+    const porMarca = {};
+    filtrados.forEach((c) => {
+      const porAnuncio = (porMarca[c.marca] ||= {});
+      const acc = (porAnuncio[c.adId] ||= {
+        brandId: c.brandId, nomeAnuncio: c.nomeAnuncio, thumbnailUrl: c.thumbnailUrl, gasto: 0, leads: 0, ultimaData: c.data,
+      });
+      acc.gasto += c.gasto;
+      acc.leads += c.leads;
+      if (c.data > acc.ultimaData) acc.ultimaData = c.data;
+    });
+    return Object.entries(porMarca)
+      .map(([marca, anuncios]) => {
+        const lista = Object.values(anuncios)
+          .sort((a, b) => b.leads - a.leads)
+          .slice(0, 3)
+          .map((a, i) => ({
+            rank: i + 1,
+            nomeAnuncio: a.nomeAnuncio,
+            thumbnailUrl: a.thumbnailUrl,
+            gasto: a.gasto,
+            leads: a.leads,
+            custoPorLead: a.leads ? a.gasto / a.leads : 0,
+            atualizadoEm: a.ultimaData,
+          }));
+        return { brandId: Object.values(anuncios)[0]?.brandId, marca, criativos: lista };
+      })
+      .filter((item) => item.criativos.length > 0);
+  }, [dashboardData.criativosDiarios, brandsToShow, range]);
+  const organicoToShow = useMemo(
+    () => dashboardData.organico.filter((o) => o.marcas.some((m) => brandsToShow.includes(m))),
+    [dashboardData.organico, brandsToShow]
   );
+  const noticiasToShow = useMemo(
+    () => dashboardData.noticias.filter((n) => brandsToShow.includes(n.marca)),
+    [dashboardData.noticias, brandsToShow]
+  );
+  const [creativesExpanded, setCreativesExpanded] = useState(false);
+  const [noticiasExpanded, setNoticiasExpanded] = useState(false);
+  useEffect(() => { setCreativesExpanded(false); setNoticiasExpanded(false); }, [brandsToShow]);
+  const CREATIVES_PREVIEW_COUNT = 3;
+  const creativesToRender = creativesExpanded ? topCreativesToShow : topCreativesToShow.slice(0, CREATIVES_PREVIEW_COUNT);
+  const hasMoreCreatives = topCreativesToShow.length > CREATIVES_PREVIEW_COUNT;
+  const NOTICIAS_PREVIEW_COUNT = 3;
+  const noticiasToRender = noticiasExpanded ? noticiasToShow : noticiasToShow.slice(0, NOTICIAS_PREVIEW_COUNT);
+  const hasMoreNoticias = noticiasToShow.length > NOTICIAS_PREVIEW_COUNT;
 
   function handleSort(key) {
     setSortConfig((prev) => (prev.key === key ? { key, dir: prev.dir === "asc" ? "desc" : "asc" } : { key, dir: "asc" }));
   }
 
-  const bg = dark ? "bg-slate-950" : "bg-slate-50";
-  const text = dark ? "text-slate-100" : "text-slate-900";
-  const cardBg = dark ? "bg-slate-900/70 border-slate-800" : "bg-white border-slate-200 shadow-sm";
-  const mutedText = dark ? "text-slate-400" : "text-slate-500";
-  const lastUpdated = dashboardData.meta.lastSync ? new Date(dashboardData.meta.lastSync) : null;
+  const bg = dark ? "bg-neutral-950" : "bg-neutral-50";
+  const text = dark ? "text-neutral-100" : "text-neutral-900";
+  const cardBg = dark ? "bg-neutral-900/70 border-neutral-800" : "bg-white border-neutral-200 shadow-sm";
+  const mutedText = dark ? "text-neutral-400" : "text-neutral-500";
+  const previousLabel = comparativoTipo === "anoAnterior" ? "mesmo mês " + prevRange.start.getFullYear() : "mês anterior";
 
   return (
     <div className={"min-h-screen w-full " + bg + " " + text + " font-sans transition-colors"}>
+      <ToastStack toasts={toasts} dark={dark} />
+      <CreativeDetailModal creative={selectedCreative} onClose={() => setSelectedCreative(null)} dark={dark} />
+      <WelcomeOverlay show={showWelcome} nome={nome} dark={dark} />
       <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 flex flex-col gap-6">
         <header className="flex flex-wrap items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            {logoUrl ? (
-              <img src={logoUrl} alt="Logo" className="h-10 w-auto max-w-[180px] object-contain rounded-md" />
-            ) : (
-              <div className="h-10 w-10 rounded-lg bg-blue-600 flex items-center justify-center shadow-lg shadow-blue-600/20">
-                <IconGauge className="h-5 w-5 text-white" />
-              </div>
-            )}
+          <div className="flex items-center gap-3 cursor-pointer" title="Voltar para a tela principal"
+            onClick={() => { setView("dashboard"); setMarcaFiltro("todas"); }}>
+            <img src={dark ? "/static/assets/logo-escuro.png" : "/static/assets/logo-claro.png"} alt="Grupo Raviera"
+              className="h-10 w-auto object-contain" />
             <div>
-              <h1 className="text-lg font-bold tracking-tight leading-none">Grupo Raviera</h1>
-              <p className={"text-xs " + mutedText}>Tráfego Pago &amp; Performance Digital</p>
+              <h1 className="text-lg font-bold tracking-tight leading-none">Raviera Cockpit</h1>
+              <p className={"text-xs " + mutedText}>No controle de cada decisão.</p>
             </div>
           </div>
           <div className="flex items-center gap-2 flex-wrap relative">
-            {role === "admin" && (
-              <div className={"flex items-center rounded-lg p-1 border " + (dark ? "bg-slate-900 border-slate-800" : "bg-white border-slate-200")}>
-                <button onClick={() => setView("dashboard")} className={"px-3 py-1.5 rounded-md text-xs font-semibold " + (view === "dashboard" ? "bg-blue-600 text-white" : mutedText)}>Dashboard</button>
-                <button onClick={() => setView("config")} className={"px-3 py-1.5 rounded-md text-xs font-semibold " + (view === "config" ? "bg-blue-600 text-white" : mutedText)}>Configuração</button>
-              </div>
-            )}
-            <button onClick={() => setDark(!dark)} className={"h-9 w-9 flex items-center justify-center rounded-lg border " + (dark ? "bg-slate-900 border-slate-800" : "bg-white border-slate-200")} aria-label="Alternar tema">
-              {dark ? <IconSun className="h-4 w-4" /> : <IconMoon className="h-4 w-4" />}
-            </button>
-            <button onClick={() => setSettingsOpen((v) => !v)} className={"h-9 w-9 flex items-center justify-center rounded-lg border " + (dark ? "bg-slate-900 border-slate-800" : "bg-white border-slate-200")} aria-label="Aparência">
+            <div className="relative">
+              <button onClick={() => setDashboardMenuOpen((v) => !v)}
+                className={"flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-semibold " +
+                  (view !== "config" ? "bg-blue-600 text-white border-blue-600" : (dark ? "bg-neutral-900 border-neutral-800 text-neutral-200" : "bg-white border-neutral-200 text-neutral-700"))}>
+                {view === "google" ? "Google Ads" : view === "funil" ? "Informações Gerais" : "Meta Ads"}
+                <IconChevronDown className={"h-3.5 w-3.5 transition-transform" + (dashboardMenuOpen ? " rotate-180" : "")} />
+              </button>
+              {dashboardMenuOpen && (
+                <>
+                  <div className="fixed inset-0 z-10" onClick={() => setDashboardMenuOpen(false)} />
+                  <div className={"absolute left-0 top-11 z-20 w-44 rounded-lg border shadow-xl overflow-hidden " + (dark ? "bg-neutral-900 border-neutral-800" : "bg-white border-neutral-200")}>
+                    <button onClick={() => { setView("dashboard"); setDashboardMenuOpen(false); }}
+                      className={"w-full text-left px-3 py-2 text-xs font-semibold " + (view === "dashboard" ? "bg-blue-600 text-white" : (dark ? "text-neutral-200 hover:bg-neutral-800" : "text-neutral-700 hover:bg-neutral-100"))}>
+                      Meta Ads
+                    </button>
+                    <button onClick={() => { setView("google"); setDashboardMenuOpen(false); }}
+                      className={"w-full text-left px-3 py-2 text-xs font-semibold " + (view === "google" ? "bg-blue-600 text-white" : (dark ? "text-neutral-200 hover:bg-neutral-800" : "text-neutral-700 hover:bg-neutral-100"))}>
+                      Google Ads
+                    </button>
+                    {permissoes.verFunil && (
+                      <button onClick={() => { setView("funil"); setDashboardMenuOpen(false); }}
+                        className={"w-full text-left px-3 py-2 text-xs font-semibold " + (view === "funil" ? "bg-blue-600 text-white" : (dark ? "text-neutral-200 hover:bg-neutral-800" : "text-neutral-700 hover:bg-neutral-100"))}>
+                        Informações Gerais
+                      </button>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+            <button onClick={() => setSettingsOpen((v) => !v)} className={"h-9 w-9 flex items-center justify-center rounded-lg border " + (dark ? "bg-neutral-900 border-neutral-800" : "bg-white border-neutral-200")} aria-label="Configurações">
               <IconSettings className="h-4 w-4" />
             </button>
-            <button onClick={onLogout} className={"h-9 w-9 flex items-center justify-center rounded-lg border " + (dark ? "bg-slate-900 border-slate-800" : "bg-white border-slate-200")} aria-label="Sair" title={email}>
+            <button onClick={onLogout} className={"h-9 w-9 flex items-center justify-center rounded-lg border " + (dark ? "bg-neutral-900 border-neutral-800" : "bg-white border-neutral-200")} aria-label="Sair" title={email}>
               <IconLogOut className="h-4 w-4" />
             </button>
-            <SettingsPanel open={settingsOpen} onClose={() => setSettingsOpen(false)} dark={dark} setDark={setDark} logoUrl={logoUrl} setLogoUrl={setLogoUrl} />
+            <SettingsPanel open={settingsOpen} onClose={() => setSettingsOpen(false)} dark={dark} setDark={setDark} role={role} view={view} setView={setView} />
           </div>
         </header>
 
-        {error && (
-          <div className={"rounded-lg border px-3 py-2 flex items-center gap-2 text-xs " + (dark ? "bg-red-500/5 border-red-500/20 text-red-400" : "bg-red-50 border-red-200 text-red-700")}>
-            <IconAlertCircle className="h-3.5 w-3.5 shrink-0" /> {error}
-          </div>
-        )}
-
         {view === "config" ? (
-          <AdminPanel token={token} dark={dark} cardBg={cardBg} mutedText={mutedText} />
+          <AdminPanel token={token} dark={dark} cardBg={cardBg} mutedText={mutedText} pushToast={pushToast} />
+        ) : view === "google" ? (
+          <GoogleAdsDashboard token={token} dark={dark} cardBg={cardBg} mutedText={mutedText} pushToast={pushToast} permissoes={permissoes} />
+        ) : view === "funil" && permissoes.verFunil ? (
+          <FunilVendasDashboard token={token} dark={dark} cardBg={cardBg} mutedText={mutedText} pushToast={pushToast} permissoes={permissoes} />
         ) : (
           <>
+            <div className={"rounded-xl border p-3 flex items-center gap-2.5 " + cardBg}>
+              <h2 className="text-sm font-bold">{marcaFiltro === "todas" ? "Visão Geral" : marcaFiltro}</h2>
+            </div>
+
             {dashboardData.meta.demoMode && (
               <div className={"rounded-lg border px-3 py-2 flex items-center gap-2 text-xs " + (dark ? "bg-amber-500/5 border-amber-500/20 text-amber-400" : "bg-amber-50 border-amber-200 text-amber-700")}>
                 <IconRefresh className="h-3.5 w-3.5 shrink-0" />
@@ -784,60 +2292,132 @@ function RavieraDashboard({ token, role, email, onLogout }) {
               </div>
             )}
 
+            {syncing && (
+              <div className={"rounded-lg border px-3 py-2 flex items-center gap-2 text-xs " + (dark ? "bg-blue-500/5 border-blue-500/20 text-blue-400" : "bg-blue-50 border-blue-200 text-blue-700")}>
+                <IconRefresh className="h-3.5 w-3.5 shrink-0 animate-spin" />
+                Sincronizando com o Meta (saldo, gastos e criativos de todas as contas) — pode levar alguns minutos. Não clique de novo nem feche esta aba.
+              </div>
+            )}
+
             <div className={"rounded-xl border p-3 flex flex-wrap items-center gap-3 " + cardBg}>
               <div className="flex items-center gap-1.5"><IconCalendar className={"h-4 w-4 " + mutedText} /><span className={"text-xs font-medium " + mutedText}>Período:</span></div>
               <div className="flex flex-wrap gap-1">
-                {[{ id: "mesAtual", label: "Mês Atual" }, { id: "mesAnterior", label: "Mês Anterior" }, { id: "ultimos7", label: "Últimos 7 dias" }, { id: "custom", label: "Customizado" }].map((p) => (
-                  <button key={p.id} onClick={() => setPeriodo(p.id)} className={"px-3 py-1.5 rounded-md text-xs font-semibold transition-colors " + (periodo === p.id ? "bg-blue-600 text-white" : (dark ? "bg-slate-800 text-slate-300 hover:bg-slate-700" : "bg-slate-100 text-slate-600 hover:bg-slate-200"))}>{p.label}</button>
+                {[{ id: "mesAtual", label: "Mês Atual" }, { id: "mesAnterior", label: "Mês Anterior" }, { id: "comparativo", label: "Comparativo" }, { id: "custom", label: "Customizado" }].map((p) => (
+                  <button key={p.id} onClick={() => setPeriodo(p.id)} className={"px-3 py-1.5 rounded-md text-xs font-semibold transition-colors " + (periodo === p.id ? "bg-blue-600 text-white" : (dark ? "bg-neutral-800 text-neutral-300 hover:bg-neutral-700" : "bg-neutral-100 text-neutral-600 hover:bg-neutral-200"))}>{p.label}</button>
                 ))}
               </div>
               <span className={"text-xs " + mutedText}>
                 {range.start.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" })} – {range.end.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" })}
               </span>
+              {periodo === "comparativo" && (
+                <div className="w-full flex flex-wrap items-center gap-3">
+                  <span className={"text-xs font-medium " + mutedText}>Comparar com:</span>
+                  <div className="flex flex-wrap gap-1">
+                    {[{ id: "mesAnterior", label: "Mês Anterior" }, { id: "anoAnterior", label: "Mesmo Mês Ano Passado" }].map((c) => (
+                      <button key={c.id} onClick={() => setComparativoTipo(c.id)} className={"px-3 py-1.5 rounded-md text-xs font-semibold transition-colors " + (comparativoTipo === c.id ? "bg-blue-600 text-white" : (dark ? "bg-neutral-800 text-neutral-300 hover:bg-neutral-700" : "bg-neutral-100 text-neutral-600 hover:bg-neutral-200"))}>{c.label}</button>
+                    ))}
+                  </div>
+                  <span className={"text-xs " + mutedText}>
+                    vs {prevRange.start.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric" })} – {prevRange.end.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric" })}
+                  </span>
+                </div>
+              )}
               {periodo === "custom" && (
                 <div className="flex items-center gap-2">
-                  <input type="date" value={customStart} onChange={(e) => setCustomStart(e.target.value)} className={"px-2 py-1.5 rounded-md border text-xs " + (dark ? "bg-slate-800 border-slate-700 text-slate-100" : "bg-white border-slate-200")} />
+                  <input type="date" value={customStart} onChange={(e) => setCustomStart(e.target.value)} className={"px-2 py-1.5 rounded-md border text-xs " + (dark ? "bg-neutral-800 border-neutral-700 text-neutral-100" : "bg-white border-neutral-200")} />
                   <span className={"text-xs " + mutedText}>até</span>
-                  <input type="date" value={customEnd} onChange={(e) => setCustomEnd(e.target.value)} className={"px-2 py-1.5 rounded-md border text-xs " + (dark ? "bg-slate-800 border-slate-700 text-slate-100" : "bg-white border-slate-200")} />
+                  <input type="date" value={customEnd} onChange={(e) => setCustomEnd(e.target.value)} className={"px-2 py-1.5 rounded-md border text-xs " + (dark ? "bg-neutral-800 border-neutral-700 text-neutral-100" : "bg-white border-neutral-200")} />
                 </div>
               )}
               <div className="flex items-center gap-3 ml-auto">
                 <div className="flex items-center gap-1.5 text-xs">
-                  <span className={mutedText}>{lastUpdated ? "Atualizado às " + lastUpdated.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" }) : ""}</span>
-                  <button onClick={refreshData} disabled={loading} aria-label="Atualizar dados"
-                    className={"h-7 w-7 flex items-center justify-center rounded-md border disabled:opacity-50 " + (dark ? "bg-slate-800 border-slate-700" : "bg-slate-100 border-slate-200")}>
-                    <IconRefresh className={"h-3.5 w-3.5 " + mutedText + (loading ? " animate-spin" : "")} />
+                  <span className={mutedText}>{fmtAtualizado(dashboardData.meta.lastSync)}</span>
+                  <button onClick={refreshData} disabled={loading || syncing} aria-label="Atualizar dados" title={syncing ? "Sincronizando com o Meta..." : "Atualizar dados"}
+                    className={"h-7 w-7 flex items-center justify-center rounded-md border disabled:opacity-50 " + (dark ? "bg-neutral-800 border-neutral-700" : "bg-neutral-100 border-neutral-200")}>
+                    <IconRefresh className={"h-3.5 w-3.5 " + mutedText + (loading || syncing ? " animate-spin" : "")} />
                   </button>
                 </div>
                 <div className="flex items-center gap-1.5">
                   <IconBuilding className={"h-4 w-4 " + mutedText} />
                   <div className="relative">
-                    <select value={marcaFiltro} onChange={(e) => setMarcaFiltro(e.target.value)} className={"appearance-none pl-3 pr-8 py-1.5 rounded-md border text-xs font-semibold cursor-pointer " + (dark ? "bg-slate-800 border-slate-700 text-slate-100" : "bg-white border-slate-200 text-slate-900")}>
+                    <select value={marcaFiltro} onChange={(e) => setMarcaFiltro(e.target.value)} className={"appearance-none pl-3 pr-8 py-1.5 rounded-md border text-xs font-semibold cursor-pointer " + (dark ? "bg-neutral-800 border-neutral-700 text-neutral-100" : "bg-white border-neutral-200 text-neutral-900")}>
                       <option value="todas">Todas as Marcas</option>
                       {brandsList.map((m) => <option key={m} value={m}>{m}</option>)}
                     </select>
-                    <IconChevronDown className={"h-3.5 w-3.5 absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none " + mutedText} />
+                    <IconChevronDown className={"h-3.5 w-3.5 absolute right-2.5 top-1/2 -tranneutral-y-1/2 pointer-events-none " + mutedText} />
                   </div>
                 </div>
               </div>
             </div>
 
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              <KpiCard IconComp={IconDollar} label="Investimento" value={fmtBRL(currentAgg.gasto)} badgeValue={variacao(currentAgg.gasto, previousAgg.gasto)} dark={dark} accent="#3b82f6" />
-              <KpiCard IconComp={IconUsers} label="Leads Gerados" value={fmtNum(currentAgg.quantidade)} badgeValue={variacao(currentAgg.quantidade, previousAgg.quantidade)} dark={dark} accent="#6366f1" />
-              <KpiCard IconComp={IconTarget} label="CPL Médio" value={fmtBRL(currentAgg.cpl)} badgeValue={variacao(currentAgg.cpl, previousAgg.cpl) !== null ? -variacao(currentAgg.cpl, previousAgg.cpl) : null} dark={dark} accent="#a855f7" />
-              <KpiCard IconComp={IconAlertCircle} label="Contas em Alerta de Saldo" value={fmtNum(contasEmRisco)} dark={dark} accent="#ef4444" />
+              {permissoes.verInvestimento && (
+                <KpiCard gauge IconComp={IconDollar} label="Investimento" value={fmtBRL(currentAgg.gasto)} badgeValue={variacao(currentAgg.gasto, previousAgg.gasto)} previousValue={periodo === "comparativo" ? fmtBRL(previousAgg.gasto) : undefined} previousLabel={previousLabel} dark={dark} accent="#3b82f6" />
+              )}
+              <KpiCard gauge IconComp={IconUsers} label="Leads Gerados" value={fmtNum(currentAgg.quantidade)} badgeValue={variacao(currentAgg.quantidade, previousAgg.quantidade)} previousValue={periodo === "comparativo" ? fmtNum(previousAgg.quantidade) : undefined} previousLabel={previousLabel} dark={dark} accent="#6366f1" />
+              {permissoes.verInvestimento && (
+                <KpiCard gauge menorMelhor IconComp={IconTarget} label="CPL Médio" value={fmtBRL(currentAgg.cpl)} badgeValue={variacao(currentAgg.cpl, previousAgg.cpl)} previousValue={periodo === "comparativo" ? fmtBRL(previousAgg.cpl) : undefined} previousLabel={previousLabel} dark={dark} accent="#a855f7" />
+              )}
+              {permissoes.verSaldo && (
+                <KpiCard IconComp={IconAlertCircle} label="Contas em Alerta de Saldo" value={fmtNum(contasEmRisco)} dark={dark} accent="#ef4444" />
+              )}
             </div>
 
             {topCreativesToShow.length > 0 && (
               <div className={"rounded-xl border p-4 " + cardBg}>
-                <h2 className="text-sm font-bold mb-1 flex items-center gap-1.5"><IconAward className="h-4 w-4 text-amber-500" /> Melhor Anúncio por Marca</h2>
-                <p className={"text-xs mb-3 " + mutedText}>Criativo com melhor performance de cada marca nos últimos 30 dias</p>
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                  {topCreativesToShow.map((item) => (
-                    <TopCreativeCard key={item.brandId} item={item} dark={dark} cardBg={cardBg} mutedText={mutedText} />
+                <h2 className="text-sm font-bold mb-1 flex items-center gap-1.5"><IconAward className="h-4 w-4 text-amber-500" /> Top 3 Melhores Anúncios por Marca</h2>
+                <p className={"text-xs mb-3 " + mutedText}>Os 3 criativos com melhor performance de cada marca no período selecionado acima — investimento, leads e custo por lead</p>
+                <div className="flex flex-col gap-4">
+                  {creativesToRender.map((item) => (
+                    <TopCreativesBrandGroup key={item.brandId} item={item} dark={dark} cardBg={cardBg} mutedText={mutedText} onSelectCreative={setSelectedCreative} />
                   ))}
                 </div>
+                {hasMoreCreatives && (
+                  <button onClick={() => setCreativesExpanded((v) => !v)}
+                    className={"mt-4 w-full flex items-center justify-center gap-1.5 py-2 rounded-md text-xs font-semibold border transition-colors " +
+                      (dark ? "bg-neutral-800 border-neutral-700 text-neutral-200 hover:bg-neutral-700" : "bg-neutral-100 border-neutral-200 text-neutral-700 hover:bg-neutral-200")}>
+                    {creativesExpanded ? "Ver menos" : "Ver todas (" + topCreativesToShow.length + ")"}
+                    <IconChevronDown className={"h-3.5 w-3.5 transition-transform" + (creativesExpanded ? " rotate-180" : "")} />
+                  </button>
+                )}
+              </div>
+            )}
+
+            {organicoToShow.length > 0 && (
+              <div className={"rounded-xl border p-4 " + cardBg}>
+                <h2 className="text-sm font-bold mb-1 flex items-center gap-1.5"><IconInstagram className="h-4 w-4 text-pink-500" /> Alcance Orgânico no Instagram</h2>
+                <p className={"text-xs mb-3 " + mutedText}>Post com mais curtidas e seguidores conquistados no período, por conta</p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {organicoToShow.map((item) => (
+                    <OrganicAccountCard key={item.instagramAccountId} item={item} dark={dark} cardBg={cardBg} mutedText={mutedText} />
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {permissoes.verNoticias && noticiasToShow.length > 0 && (
+              <div className={"rounded-xl border p-4 " + (marcaFiltro !== "todas" ? "overflow-hidden " : "") + cardBg}>
+                <h2 className="text-sm font-bold mb-1 flex items-center gap-1.5"><IconSparkle className="h-4 w-4 text-amber-500" /> Notícias do Setor</h2>
+                <p className={"text-xs mb-3 " + mutedText}>Manchetes recentes de portais automotivos (Quatro Rodas, Motor1, AutoPapo) que citam as marcas do grupo — atualiza sozinho às 08h e 15h, ou ao clicar em "Atualizar"</p>
+                {marcaFiltro !== "todas" ? (
+                  <NewsCarousel itens={(noticiasToShow[0] || {}).itens || []} dark={dark} mutedText={mutedText} />
+                ) : (
+                  <>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                      {noticiasToRender.map((item) => (
+                        <NewsBrandGroup key={item.brandId} item={item} dark={dark} mutedText={mutedText} />
+                      ))}
+                    </div>
+                    {hasMoreNoticias && (
+                      <button onClick={() => setNoticiasExpanded((v) => !v)}
+                        className={"mt-4 w-full flex items-center justify-center gap-1.5 py-2 rounded-md text-xs font-semibold border transition-colors " +
+                          (dark ? "bg-neutral-800 border-neutral-700 text-neutral-200 hover:bg-neutral-700" : "bg-neutral-100 border-neutral-200 text-neutral-700 hover:bg-neutral-200")}>
+                        {noticiasExpanded ? "Ver menos" : "Ver todas (" + noticiasToShow.length + ")"}
+                        <IconChevronDown className={"h-3.5 w-3.5 transition-transform" + (noticiasExpanded ? " rotate-180" : "")} />
+                      </button>
+                    )}
+                  </>
+                )}
               </div>
             )}
 
@@ -848,7 +2428,7 @@ function RavieraDashboard({ token, role, email, onLogout }) {
                 { shape: "line", color: "#3b82f6", label: "Investimento (R$) — área e linha" },
                 { shape: "line", color: "#f59e0b", label: "Leads gerados — linha tracejada e pontos", dashed: true },
               ]} />
-              {loading ? <div className="h-[280px] flex items-center justify-center text-xs text-slate-500">Carregando dados...</div> : <EvolutionChart data={evolucaoDiaria} dark={dark} />}
+              {loading ? <div className="h-[280px] flex items-center justify-center text-xs text-neutral-500">Carregando dados...</div> : <EvolutionChart data={evolucaoDiaria} dark={dark} />}
             </div>
 
             {brandsToShow.length > 1 && (
@@ -863,6 +2443,7 @@ function RavieraDashboard({ token, role, email, onLogout }) {
               </div>
             )}
 
+            {permissoes.verSaldo && (
             <div className={"rounded-xl border p-4 overflow-x-auto " + cardBg}>
               <h2 className="text-sm font-bold mb-1">Saldo das Contas de Anúncios (Meta Ads)</h2>
               <p className={"text-xs mb-4 " + mutedText}>Runway estimado: saldo atual ÷ diário esperado · Crítico ≤{RUNWAY_CRITICO}d · Atenção ≤{RUNWAY_ATENCAO}d</p>
@@ -877,7 +2458,7 @@ function RavieraDashboard({ token, role, email, onLogout }) {
                   <SortableTh label="Runway" sortKey="diasRestantes" sortConfig={sortConfig} onSort={handleSort} />
                   <SortableTh label="Status" sortKey="status" sortConfig={sortConfig} onSort={handleSort} />
                 </tr></thead>
-                <tbody className={"divide-y " + (dark ? "divide-slate-800" : "divide-slate-100")}>
+                <tbody className={"divide-y " + (dark ? "divide-neutral-800" : "divide-neutral-100")}>
                   {linhasSaldoOrdenadas.map((row) => (
                     <tr key={row.marca}>
                       <td className="py-2.5 font-semibold">{row.marca}</td>
@@ -892,7 +2473,7 @@ function RavieraDashboard({ token, role, email, onLogout }) {
                   ))}
                 </tbody>
                 <tfoot>
-                  <tr className={"border-t font-semibold " + (dark ? "border-slate-800" : "border-slate-200")}>
+                  <tr className={"border-t font-semibold " + (dark ? "border-neutral-800" : "border-neutral-200")}>
                     <td className="py-2.5">Total ({linhasSaldo.length})</td>
                     <td className="py-2.5 tabular-nums">{fmtBRL(totalsSaldo.gasto)}</td>
                     <td className="py-2.5 tabular-nums">{fmtNum(totalsSaldo.quantidade)}</td>
@@ -908,11 +2489,13 @@ function RavieraDashboard({ token, role, email, onLogout }) {
                 </tfoot>
               </table>
             </div>
+            )}
 
-            <footer className={"text-center text-[11px] py-2 " + mutedText}>Grupo Raviera · Vendas e test-drives serão integrados em uma etapa futura (outro sistema)</footer>
+            <footer className={"text-center text-[11px] py-2 " + mutedText}>Raviera Cockpit · Vendas e test-drives serão integrados em uma etapa futura (outro sistema) · v{APP_VERSION}</footer>
           </>
         )}
       </div>
+      <ChatWidget dark={dark} />
     </div>
   );
 }
@@ -926,24 +2509,34 @@ function App() {
     const token = localStorage.getItem("raviera_token");
     const role = localStorage.getItem("raviera_role");
     const email = localStorage.getItem("raviera_email");
-    return token ? { token, role, email } : null;
+    const nome = localStorage.getItem("raviera_nome");
+    const permissoesRaw = localStorage.getItem("raviera_permissoes");
+    const permissoes = permissoesRaw ? JSON.parse(permissoesRaw) : { verSaldo: true, verInvestimento: true, verFunil: true, verNoticias: true };
+    return token ? { token, role, email, nome, permissoes } : null;
   });
+  const [justLoggedIn, setJustLoggedIn] = useState(false);
 
   function handleLogin(result) {
+    const permissoes = { verSaldo: result.verSaldo, verInvestimento: result.verInvestimento, verFunil: result.verFunil, verNoticias: result.verNoticias };
     localStorage.setItem("raviera_token", result.access_token);
     localStorage.setItem("raviera_role", result.role);
     localStorage.setItem("raviera_email", result.email);
-    setSession({ token: result.access_token, role: result.role, email: result.email });
+    localStorage.setItem("raviera_nome", result.nome || "");
+    localStorage.setItem("raviera_permissoes", JSON.stringify(permissoes));
+    setJustLoggedIn(true);
+    setSession({ token: result.access_token, role: result.role, email: result.email, nome: result.nome, permissoes });
   }
   function handleLogout() {
     localStorage.removeItem("raviera_token");
     localStorage.removeItem("raviera_role");
     localStorage.removeItem("raviera_email");
+    localStorage.removeItem("raviera_nome");
+    localStorage.removeItem("raviera_permissoes");
     setSession(null);
   }
 
   if (!session) return <LoginScreen onLogin={handleLogin} />;
-  return <RavieraDashboard token={session.token} role={session.role} email={session.email} onLogout={handleLogout} />;
+  return <RavieraDashboard token={session.token} role={session.role} email={session.email} nome={session.nome} permissoes={session.permissoes} justLoggedIn={justLoggedIn} onLogout={handleLogout} />;
 }
 
 ReactDOM.createRoot(document.getElementById("root")).render(<App />);

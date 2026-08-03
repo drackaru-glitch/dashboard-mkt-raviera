@@ -3,8 +3,20 @@ from sqlalchemy.orm import Session
 
 from app.auth import hash_password, require_admin
 from app.database import get_db
-from app.models import AdAccount, Brand, User, UserBrand
-from app.schemas import AdAccountIn, AdAccountOut, BrandIn, BrandOut, UserIn, UserOut, UserUpdate
+from app.models import AdAccount, Brand, GoogleAdsAccount, InstagramAccount, User, UserBrand
+from app.schemas import (
+    AdAccountIn,
+    AdAccountOut,
+    BrandIn,
+    BrandOut,
+    GoogleAdsAccountIn,
+    GoogleAdsAccountOut,
+    InstagramAccountIn,
+    InstagramAccountOut,
+    UserIn,
+    UserOut,
+    UserUpdate,
+)
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_admin)])
 
@@ -12,10 +24,15 @@ router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(requir
 def _user_out(user: User) -> UserOut:
     return UserOut(
         id=user.id,
+        nome=user.nome,
         email=user.email,
         role=user.role,
         ativo=user.ativo,
         brand_ids=[link.brand_id for link in user.brands],
+        ver_saldo=user.ver_saldo,
+        ver_investimento=user.ver_investimento,
+        ver_funil=user.ver_funil,
+        ver_noticias=user.ver_noticias,
     )
 
 
@@ -53,6 +70,91 @@ def update_ad_account(account_id: int, payload: AdAccountIn, db: Session = Depen
 @router.delete("/ad-accounts/{account_id}")
 def delete_ad_account(account_id: int, db: Session = Depends(get_db)):
     account = db.query(AdAccount).filter(AdAccount.id == account_id).first()
+    if not account:
+        raise HTTPException(status_code=404, detail="Conta não encontrada.")
+    db.delete(account)
+    db.commit()
+    return {"ok": True}
+
+
+# --- Contas do Instagram ---
+
+
+@router.get("/instagram-accounts", response_model=list[InstagramAccountOut])
+def list_instagram_accounts(db: Session = Depends(get_db)):
+    return db.query(InstagramAccount).all()
+
+
+@router.post("/instagram-accounts", response_model=InstagramAccountOut)
+def create_instagram_account(payload: InstagramAccountIn, db: Session = Depends(get_db)):
+    if db.query(InstagramAccount).filter(InstagramAccount.instagram_business_id == payload.instagram_business_id).first():
+        raise HTTPException(status_code=400, detail="Já existe uma conta com esse ID do Instagram.")
+    account = InstagramAccount(**payload.model_dump())
+    db.add(account)
+    db.commit()
+    db.refresh(account)
+    return account
+
+
+@router.put("/instagram-accounts/{account_id}", response_model=InstagramAccountOut)
+def update_instagram_account(account_id: int, payload: InstagramAccountIn, db: Session = Depends(get_db)):
+    account = db.query(InstagramAccount).filter(InstagramAccount.id == account_id).first()
+    if not account:
+        raise HTTPException(status_code=404, detail="Conta não encontrada.")
+    account.instagram_business_id = payload.instagram_business_id
+    account.username = payload.username
+    account.nome = payload.nome
+    if payload.access_token:
+        account.access_token = payload.access_token
+    db.commit()
+    db.refresh(account)
+    return account
+
+
+@router.delete("/instagram-accounts/{account_id}")
+def delete_instagram_account(account_id: int, db: Session = Depends(get_db)):
+    account = db.query(InstagramAccount).filter(InstagramAccount.id == account_id).first()
+    if not account:
+        raise HTTPException(status_code=404, detail="Conta não encontrada.")
+    db.delete(account)
+    db.commit()
+    return {"ok": True}
+
+
+# --- Contas do Google Ads ---
+
+
+@router.get("/google-ads-accounts", response_model=list[GoogleAdsAccountOut])
+def list_google_ads_accounts(db: Session = Depends(get_db)):
+    return db.query(GoogleAdsAccount).all()
+
+
+@router.post("/google-ads-accounts", response_model=GoogleAdsAccountOut)
+def create_google_ads_account(payload: GoogleAdsAccountIn, db: Session = Depends(get_db)):
+    if db.query(GoogleAdsAccount).filter(GoogleAdsAccount.customer_id == payload.customer_id).first():
+        raise HTTPException(status_code=400, detail="Já existe uma conta com esse Customer ID.")
+    account = GoogleAdsAccount(**payload.model_dump())
+    db.add(account)
+    db.commit()
+    db.refresh(account)
+    return account
+
+
+@router.put("/google-ads-accounts/{account_id}", response_model=GoogleAdsAccountOut)
+def update_google_ads_account(account_id: int, payload: GoogleAdsAccountIn, db: Session = Depends(get_db)):
+    account = db.query(GoogleAdsAccount).filter(GoogleAdsAccount.id == account_id).first()
+    if not account:
+        raise HTTPException(status_code=404, detail="Conta não encontrada.")
+    account.customer_id = payload.customer_id
+    account.nome = payload.nome
+    db.commit()
+    db.refresh(account)
+    return account
+
+
+@router.delete("/google-ads-accounts/{account_id}")
+def delete_google_ads_account(account_id: int, db: Session = Depends(get_db)):
+    account = db.query(GoogleAdsAccount).filter(GoogleAdsAccount.id == account_id).first()
     if not account:
         raise HTTPException(status_code=404, detail="Conta não encontrada.")
     db.delete(account)
@@ -113,7 +215,17 @@ def list_users(db: Session = Depends(get_db)):
 def create_user(payload: UserIn, db: Session = Depends(get_db)):
     if db.query(User).filter(User.email == payload.email).first():
         raise HTTPException(status_code=400, detail="Já existe um usuário com esse e-mail.")
-    user = User(email=payload.email, password_hash=hash_password(payload.password), role=payload.role, ativo=True)
+    user = User(
+        nome=payload.nome,
+        email=payload.email,
+        password_hash=hash_password(payload.password),
+        role=payload.role,
+        ativo=True,
+        ver_saldo=payload.ver_saldo,
+        ver_investimento=payload.ver_investimento,
+        ver_funil=payload.ver_funil,
+        ver_noticias=payload.ver_noticias,
+    )
     db.add(user)
     db.flush()
     for brand_id in payload.brand_ids:
@@ -128,12 +240,22 @@ def update_user(user_id: int, payload: UserUpdate, db: Session = Depends(get_db)
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+    if payload.nome is not None:
+        user.nome = payload.nome
     if payload.role is not None:
         user.role = payload.role
     if payload.ativo is not None:
         user.ativo = payload.ativo
     if payload.password:
         user.password_hash = hash_password(payload.password)
+    if payload.ver_saldo is not None:
+        user.ver_saldo = payload.ver_saldo
+    if payload.ver_investimento is not None:
+        user.ver_investimento = payload.ver_investimento
+    if payload.ver_funil is not None:
+        user.ver_funil = payload.ver_funil
+    if payload.ver_noticias is not None:
+        user.ver_noticias = payload.ver_noticias
     if payload.brand_ids is not None:
         db.query(UserBrand).filter(UserBrand.user_id == user.id).delete()
         for brand_id in payload.brand_ids:
