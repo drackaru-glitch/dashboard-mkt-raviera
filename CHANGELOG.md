@@ -4,6 +4,15 @@ Registro de versões do projeto. Uma versão nova é criada a cada conjunto de a
 
 ---
 
+## 0.45 — 2026-08-03
+
+### Deploy
+- Toast de sucesso ao atualizar dados no Meta Ads, mostrando quantas contas foram sincronizadas.
+- Script de atualização automática pro servidor (`deploy/auto-update.sh`): verifica a cada 5 minutos se tem versão nova no GitHub e, se tiver, atualiza e reinicia sozinho — o TI não precisa aplicar cada atualização manualmente depois da instalação inicial.
+- Guia de instalação atualizado com o passo a passo desse recurso.
+
+---
+
 ## 0.44 — 2026-08-03
 
 Primeira versão numerada do projeto. Reúne a integração real com as APIs (Meta Ads, Google Ads, Instagram), o sistema de permissões por usuário e diversas correções de dados e performance.

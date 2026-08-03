@@ -3,7 +3,7 @@
 > Material pra equipe de TI hospedar o Raviera Cockpit num subdomínio da empresa. Os nomes técnicos (pasta do projeto, repositório, serviço systemd, etc.) continuam usando "raviera"/"dashboard-raviera" internamente — só o nome exibido pro usuário mudou.
 > Dúvidas técnicas sobre este guia: fale com Felipe (responsável pelo projeto).
 >
-> **Versão deste guia: 0.44** (o número da versão instalada aparece no rodapé do próprio sistema, e o histórico de mudanças de cada versão fica em `CHANGELOG.md` na raiz do repositório).
+> **Versão deste guia: 0.45** (o número da versão instalada aparece no rodapé do próprio sistema, e o histórico de mudanças de cada versão fica em `CHANGELOG.md` na raiz do repositório).
 
 ---
 
@@ -220,6 +220,30 @@ Duas coisas pra ficar de olho antes de rodar isso:
 - **Confira o `CHANGELOG.md`** da nova versão — raramente, uma mudança de banco de dados exige um comando extra (o próprio changelog avisa quando isso acontece; se não avisar, é só `git pull` + reiniciar mesmo).
 - O `backend/.env` e `backend/raviera.db` **não fazem parte do `git pull`** (ficam de fora do repositório de propósito) — uma atualização normal nunca mexe neles.
 
+### Atualização automática (recomendado)
+
+Como quem mantém o projeto (Felipe, junto com a Claude) não tem acesso ao servidor de produção, o ideal é o **servidor mesmo verificar sozinho** se tem versão nova, em vez de alguém do TI precisar rodar o `git pull` manualmente toda vez. Tem um script pronto em `deploy/auto-update.sh` que faz isso.
+
+Configuração (uma vez só, na instalação):
+
+```bash
+cd /opt/dashboard-mkt-raviera
+chmod +x deploy/auto-update.sh
+
+# libera o restart do serviço sem pedir senha, só pra esse comando específico:
+echo "raviera ALL=(ALL) NOPASSWD: /bin/systemctl restart dashboard-raviera" \
+  | sudo tee /etc/sudoers.d/raviera-auto-update
+
+# agenda no cron do usuário que roda o serviço (ex.: "raviera"), rodando a cada 5 minutos:
+crontab -e
+# adicione a linha:
+# */5 * * * * /opt/dashboard-mkt-raviera/deploy/auto-update.sh >> /var/log/raviera-auto-update.log 2>&1
+```
+
+A partir daí, sempre que uma versão nova for publicada no GitHub, o servidor puxa e reinicia sozinho em até 5 minutos — ninguém precisa entrar no servidor pra isso. Pra acompanhar: `tail -f /var/log/raviera-auto-update.log`.
+
+Se a equipe de TI preferir manter controle manual sobre quando cada atualização entra no ar, é só não configurar esse cron — nesse caso, seguir o comando manual da tabela acima quando o Felipe avisar que tem versão nova.
+
 ---
 
 ## 8. Checklist resumido pra copiar/colar
@@ -233,5 +257,6 @@ Duas coisas pra ficar de olho antes de rodar isso:
 - [ ] Serviço systemd configurado e rodando (`systemctl status dashboard-raviera`)
 - [ ] Nginx configurado e certificado HTTPS emitido
 - [ ] Painel acessível em `https://dashboard.gruporaviera.com.br`
-- [ ] Rodapé do sistema mostrando a versão esperada (ex.: "v0.44")
+- [ ] Rodapé do sistema mostrando a versão esperada (ex.: "v0.45")
+- [ ] Atualização automática configurada (`deploy/auto-update.sh` + cron) — opcional, mas recomendado
 - [ ] Webhooks do Followize cadastrados (depois de confirmar que o domínio está no ar)
