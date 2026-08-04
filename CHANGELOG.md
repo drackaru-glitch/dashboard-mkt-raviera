@@ -4,6 +4,18 @@ Registro de versões do projeto. Uma versão nova é criada a cada conjunto de a
 
 ---
 
+## 0.46 — 2026-08-04
+
+### Suporte a PostgreSQL
+- Aplicação agora suporta PostgreSQL além de SQLite — troca só a variável `DATABASE_URL` no `.env`, sem mudança de código (já usava SQLAlchemy, que abstrai isso).
+- Driver `psycopg2-binary` adicionado às dependências.
+- `pool_pre_ping` ativado na conexão do banco (evita erros de "conexão perdida" comuns em bancos gerenciados).
+- Novo script `backend/migrate_to_postgres.py`: migra a estrutura e todos os dados do `raviera.db` atual pra um banco Postgres novo (preserva marcas, usuários e histórico já sincronizado).
+- Guia de instalação atualizado com o passo a passo e a lista do que pedir pro time de desenvolvimento (host, banco, usuário/senha, SSL, acesso de rede).
+- Pendente: rodar a migração de verdade assim que o time de dev passar os dados de acesso ao Postgres.
+
+---
+
 ## 0.45 — 2026-08-03
 
 ### Deploy

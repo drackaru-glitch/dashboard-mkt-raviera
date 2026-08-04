@@ -3,7 +3,7 @@
 > Material pra equipe de TI hospedar o Raviera Cockpit num subdomínio da empresa. Os nomes técnicos (pasta do projeto, repositório, serviço systemd, etc.) continuam usando "raviera"/"dashboard-raviera" internamente — só o nome exibido pro usuário mudou.
 > Dúvidas técnicas sobre este guia: fale com Felipe (responsável pelo projeto).
 >
-> **Versão deste guia: 0.45** (o número da versão instalada aparece no rodapé do próprio sistema, e o histórico de mudanças de cada versão fica em `CHANGELOG.md` na raiz do repositório).
+> **Versão deste guia: 0.46** (o número da versão instalada aparece no rodapé do próprio sistema, e o histórico de mudanças de cada versão fica em `CHANGELOG.md` na raiz do repositório).
 
 ---
 
@@ -115,6 +115,32 @@ python3.12 -m venv .venv
   ```
   Isso cria o primeiro usuário administrador, usando `ADMIN_EMAIL`/`ADMIN_PASSWORD` definidos no `.env`.
 
+### 4.4-alt Alternativa: usando PostgreSQL em vez de SQLite
+
+Se o padrão da empresa for PostgreSQL, a aplicação já suporta isso nativamente — só muda a variável `DATABASE_URL` no `.env`:
+
+```bash
+# em vez de: DATABASE_URL=sqlite:///./raviera.db
+DATABASE_URL=postgresql://usuario:senha@host:5432/nome_do_banco
+```
+
+O driver (`psycopg2-binary`) já está no `requirements.txt`. Duas situações:
+
+- **Banco vazio**: não precisa fazer mais nada — a aplicação cria a estrutura de tabelas sozinha na primeira vez que rodar, e depois é só rodar `seed.py` (passo acima) pra criar o admin inicial.
+- **Migrando os dados já existentes** (recomendado, evita recadastrar as 24 marcas): com o `.env` já apontando pro Postgres e o `raviera.db` recebido do Felipe dentro de `backend/`, rode:
+  ```bash
+  cd backend
+  .venv/bin/python migrate_to_postgres.py
+  ```
+  O script cria a estrutura no Postgres e copia todos os dados do `raviera.db` pra lá. Confira a saída — ele avisa quantas linhas foram migradas por tabela. **Não rode esse comando duas vezes no mesmo banco Postgres** (duplicaria os dados); se precisar rodar de novo, esvazie o banco Postgres antes.
+
+O que pedir pro time de desenvolvimento (dono do Postgres da empresa):
+- Host/endereço e porta (padrão `5432`)
+- Nome do banco de dados (pode ser um banco novo dedicado a esta aplicação, ou pedir pra criarem um)
+- Usuário e senha com permissão de criar tabelas nesse banco (não precisa ser superusuário)
+- Se a conexão exige SSL (`?sslmode=require` no final da `DATABASE_URL`) — comum em bancos gerenciados
+- Confirmar que o servidor onde a aplicação vai rodar tem acesso de rede até o Postgres (liberação de firewall/VPC, se for banco interno da empresa)
+
 ### 4.5 Testar rodando manualmente (antes de virar serviço)
 
 ```bash
@@ -204,7 +230,8 @@ https://dashboard.gruporaviera.com.br/webhooks/followize/finalizacao?token=...
 | Reiniciar a aplicação | `sudo systemctl restart dashboard-raviera` |
 | Atualizar o código (nova versão) | `cd /opt/dashboard-mkt-raviera && sudo git pull && sudo systemctl restart dashboard-raviera` |
 | Ver qual versão está rodando | Olhar o rodapé do sistema no navegador (ex.: "v0.44"), ou `cat /opt/dashboard-mkt-raviera/VERSION` no servidor |
-| Backup do banco | Copiar o arquivo `backend/raviera.db` periodicamente (é só um arquivo, backup simples) |
+| Backup do banco (SQLite) | Copiar o arquivo `backend/raviera.db` periodicamente (é só um arquivo, backup simples) |
+| Backup do banco (Postgres) | Segue a rotina de backup padrão do Postgres da empresa (`pg_dump`) — não é responsabilidade desta aplicação, é a mesma política usada pros outros bancos internos |
 
 ### Como funcionam as atualizações (versões)
 
@@ -257,6 +284,6 @@ Se a equipe de TI preferir manter controle manual sobre quando cada atualizaçã
 - [ ] Serviço systemd configurado e rodando (`systemctl status dashboard-raviera`)
 - [ ] Nginx configurado e certificado HTTPS emitido
 - [ ] Painel acessível em `https://dashboard.gruporaviera.com.br`
-- [ ] Rodapé do sistema mostrando a versão esperada (ex.: "v0.45")
+- [ ] Rodapé do sistema mostrando a versão esperada (ex.: "v0.46")
 - [ ] Atualização automática configurada (`deploy/auto-update.sh` + cron) — opcional, mas recomendado
 - [ ] Webhooks do Followize cadastrados (depois de confirmar que o domínio está no ar)

@@ -13,3 +13,4 @@ google-auth==2.56.2
 google-auth-oauthlib==1.4.0
 feedparser==6.0.14
 apscheduler==3.11.3
+psycopg2-binary==2.9.10
