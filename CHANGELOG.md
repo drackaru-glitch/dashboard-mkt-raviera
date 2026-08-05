@@ -1,6 +1,15 @@
-# Changelog — Raviera Cockpit
+# Changelog — FEFO
 
 Registro de versões do projeto. Uma versão nova é criada a cada conjunto de alterações relevantes, ou ao final de cada dia de trabalho.
+
+---
+
+## 0.47 — 2026-08-04
+
+### Novo nome: FEFO
+- Renomeado de "Raviera Cockpit" para **FEFO — Fast Executive Follow-up & Overview**, em tudo que é visível pro usuário: tela de login, cabeçalho, rodapés, título da aba, documentação e guia de instalação.
+- A expansão do nome ("Fast Executive Follow-up & Overview") passou a aparecer como subtítulo abaixo do nome, tanto na tela de login quanto no cabeçalho do dashboard.
+- Nomes técnicos internos (pasta do projeto, repositório no GitHub, serviço no servidor) continuam usando "raviera"/"dashboard-raviera" — não foram alterados, pra não exigir reconfiguração do que o TI já vai instalar.
 
 ---
 

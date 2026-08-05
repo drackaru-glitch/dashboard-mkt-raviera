@@ -1,6 +1,6 @@
-# Raviera Cockpit
+# FEFO
 
-> No controle de cada decisão.
+> Fast Executive Follow-up & Overview
 
 Plataforma de marketing, funil de vendas e performance do Grupo Raviera. Backend próprio (FastAPI + SQLite) com login e integração com a API do Meta; frontend em HTML + React via CDN, sem etapa de build.
 
@@ -29,7 +29,7 @@ copy .env.example .env                          # preencha os valores (ou deixe 
 .venv\Scripts\python -m uvicorn app.main:app --reload
 ```
 
-Acesse `http://127.0.0.1:8000`. Sem `META_ACCESS_TOKEN` configurado, o Raviera Cockpit funciona normalmente com dados de demonstração.
+Acesse `http://127.0.0.1:8000`. Sem `META_ACCESS_TOKEN` configurado, o FEFO funciona normalmente com dados de demonstração.
 
 ## Marcas com conta de anúncio compartilhada
 

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Raviera Cockpit</title>
+<title>FEFO</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
@@ -24,7 +24,7 @@
 
 <script type="text/babel" data-presets="react">
 const { useState, useMemo, useEffect, useRef } = React;
-const APP_VERSION = "0.46";
+const APP_VERSION = "0.47";
 
 /* ================================================================== */
 /* 1) CLIENTE DA API (backend próprio, substitui o Apps Script)         */
@@ -733,8 +733,8 @@ function LoginScreen({ onLogin }) {
         <div className="flex items-center gap-3 mb-2">
           <img src="/static/assets/logo-escuro.png" alt="Grupo Raviera" className="h-10 w-auto object-contain" />
           <div>
-            <h1 className="text-lg font-bold leading-none">Raviera Cockpit</h1>
-            <p className="text-xs text-neutral-400">No controle de cada decisão.</p>
+            <h1 className="text-lg font-bold leading-none">FEFO</h1>
+            <p className="text-xs text-neutral-400">Fast Executive Follow-up & Overview</p>
           </div>
         </div>
         {error && <div className="text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-md px-3 py-2">{error}</div>}
@@ -1426,7 +1426,7 @@ function GoogleAdsDashboard({ token, dark, cardBg, mutedText, pushToast, permiss
       </div>
       )}
 
-      <footer className={"text-center text-[11px] py-2 " + mutedText}>Raviera Cockpit · Google Ads · v{APP_VERSION}</footer>
+      <footer className={"text-center text-[11px] py-2 " + mutedText}>FEFO · Google Ads · v{APP_VERSION}</footer>
     </div>
   );
 }
@@ -1785,7 +1785,7 @@ function FunilVendasDashboard({ token, dark, cardBg, mutedText, pushToast, permi
         </div>
       )}
 
-      <footer className={"text-center text-[11px] py-2 " + mutedText}>Raviera Cockpit · Informações Gerais · v{APP_VERSION}</footer>
+      <footer className={"text-center text-[11px] py-2 " + mutedText}>FEFO · Informações Gerais · v{APP_VERSION}</footer>
     </div>
   );
 }
@@ -2229,8 +2229,8 @@ function RavieraDashboard({ token, role, email, nome, permissoes, justLoggedIn, 
             <img src={dark ? "/static/assets/logo-escuro.png" : "/static/assets/logo-claro.png"} alt="Grupo Raviera"
               className="h-10 w-auto object-contain" />
             <div>
-              <h1 className="text-lg font-bold tracking-tight leading-none">Raviera Cockpit</h1>
-              <p className={"text-xs " + mutedText}>No controle de cada decisão.</p>
+              <h1 className="text-lg font-bold tracking-tight leading-none">FEFO</h1>
+              <p className={"text-xs " + mutedText}>Fast Executive Follow-up & Overview</p>
             </div>
           </div>
           <div className="flex items-center gap-2 flex-wrap relative">
@@ -2491,7 +2491,7 @@ function RavieraDashboard({ token, role, email, nome, permissoes, justLoggedIn, 
             </div>
             )}
 
-            <footer className={"text-center text-[11px] py-2 " + mutedText}>Raviera Cockpit · Vendas e test-drives serão integrados em uma etapa futura (outro sistema) · v{APP_VERSION}</footer>
+            <footer className={"text-center text-[11px] py-2 " + mutedText}>FEFO · Vendas e test-drives serão integrados em uma etapa futura (outro sistema) · v{APP_VERSION}</footer>
           </>
         )}
       </div>

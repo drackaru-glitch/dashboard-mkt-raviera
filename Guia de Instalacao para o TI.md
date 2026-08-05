@@ -1,9 +1,9 @@
-# Guia de Instalação — Raviera Cockpit (para o TI)
+# Guia de Instalação — FEFO (para o TI)
 
-> Material pra equipe de TI hospedar o Raviera Cockpit num subdomínio da empresa. Os nomes técnicos (pasta do projeto, repositório, serviço systemd, etc.) continuam usando "raviera"/"dashboard-raviera" internamente — só o nome exibido pro usuário mudou.
+> Material pra equipe de TI hospedar o FEFO num subdomínio da empresa. Os nomes técnicos (pasta do projeto, repositório, serviço systemd, etc.) continuam usando "raviera"/"dashboard-raviera" internamente (nome do projeto quando começou) — só o nome exibido pro usuário é "FEFO".
 > Dúvidas técnicas sobre este guia: fale com Felipe (responsável pelo projeto).
 >
-> **Versão deste guia: 0.46** (o número da versão instalada aparece no rodapé do próprio sistema, e o histórico de mudanças de cada versão fica em `CHANGELOG.md` na raiz do repositório).
+> **Versão deste guia: 0.47** (o número da versão instalada aparece no rodapé do próprio sistema, e o histórico de mudanças de cada versão fica em `CHANGELOG.md` na raiz do repositório).
 
 ---
 
@@ -229,7 +229,7 @@ https://dashboard.gruporaviera.com.br/webhooks/followize/finalizacao?token=...
 | Ver logs em tempo real | `journalctl -u dashboard-raviera -f` |
 | Reiniciar a aplicação | `sudo systemctl restart dashboard-raviera` |
 | Atualizar o código (nova versão) | `cd /opt/dashboard-mkt-raviera && sudo git pull && sudo systemctl restart dashboard-raviera` |
-| Ver qual versão está rodando | Olhar o rodapé do sistema no navegador (ex.: "v0.44"), ou `cat /opt/dashboard-mkt-raviera/VERSION` no servidor |
+| Ver qual versão está rodando | Olhar o rodapé do sistema no navegador (ex.: "v0.47"), ou `cat /opt/dashboard-mkt-raviera/VERSION` no servidor |
 | Backup do banco (SQLite) | Copiar o arquivo `backend/raviera.db` periodicamente (é só um arquivo, backup simples) |
 | Backup do banco (Postgres) | Segue a rotina de backup padrão do Postgres da empresa (`pg_dump`) — não é responsabilidade desta aplicação, é a mesma política usada pros outros bancos internos |
 
@@ -284,6 +284,6 @@ Se a equipe de TI preferir manter controle manual sobre quando cada atualizaçã
 - [ ] Serviço systemd configurado e rodando (`systemctl status dashboard-raviera`)
 - [ ] Nginx configurado e certificado HTTPS emitido
 - [ ] Painel acessível em `https://dashboard.gruporaviera.com.br`
-- [ ] Rodapé do sistema mostrando a versão esperada (ex.: "v0.46")
+- [ ] Rodapé do sistema mostrando a versão esperada (ex.: "v0.47")
 - [ ] Atualização automática configurada (`deploy/auto-update.sh` + cron) — opcional, mas recomendado
 - [ ] Webhooks do Followize cadastrados (depois de confirmar que o domínio está no ar)

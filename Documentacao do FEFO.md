@@ -1,6 +1,6 @@
-# Documentação do Raviera Cockpit
+# Documentação do FEFO
 
-> No controle de cada decisão.
+> Fast Executive Follow-up & Overview
 >
 > Plataforma de marketing, funil de vendas e performance (Meta Ads, Google Ads, Funil de Vendas, Notícias do Setor) do Grupo Raviera.
 > Última atualização: 31/07/2026.
@@ -9,7 +9,7 @@
 
 ## 1. Visão Geral
 
-O Raviera Cockpit é uma plataforma web interna que reúne, num só lugar, os dados de marketing pago do grupo:
+O FEFO é uma plataforma web interna que reúne, num só lugar, os dados de marketing pago do grupo:
 
 - **Meta Ads** (Facebook/Instagram): investimento, leads, saldo das contas, melhores criativos e alcance orgânico do Instagram.
 - **Google Ads**: investimento, cliques, conversões, orçamento/saldo mensal por marca, palavras-chave com melhor desempenho e mapa de calor de localidades.
