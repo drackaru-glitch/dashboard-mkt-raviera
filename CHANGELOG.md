@@ -4,6 +4,60 @@ Registro de versões do projeto. Uma versão nova é criada a cada conjunto de a
 
 ---
 
+## 0.51 — 2026-08-24
+
+### Linhas neon nos cards
+- Traço fino na borda de cima dos cards, no estilo minimalista/futurista: aparece nos KPIs, no Top 3 Melhores Anúncios, no Alcance Orgânico e nas Notícias do Setor.
+- Cada linha usa a **cor de acento que o card já tinha** (a mesma do ícone) — nenhuma paleta nova foi criada, então o visual continua coeso.
+- A linha é curta e centralizada, com o degradê apagando nas pontas: de ponta a ponta num card largo ela viraria um borrão em vez de um detalhe.
+- O brilho existe só no tema escuro. No claro ele sumiria no fundo branco e deixaria a linha com aspecto sujo, então lá fica só o traço, um pouco mais opaco pra não desaparecer.
+- O botão de período selecionado também ganhou brilho no tema escuro.
+- Incluídos também os cards **Desempenho por Marca** (azul, a mesma cor das barras do gráfico) e **Saldo das Contas de Anúncios** (verde, a mesma do KPI "Saldo Total").
+- No card de Saldo, a rolagem horizontal saiu do card e passou a valer só para a tabela: como está no topo da borda, a linha era recortada pelo `overflow` — e, de quebra, o título e a descrição não rolam mais junto com a tabela.
+
+---
+
+## 0.50 — 2026-08-24
+
+### Velocímetro dos KPIs virou gráfico de evolução
+- Os cards de Investimento, Leads Gerados e CPL Médio trocaram o velocímetro por um **sparkline** com a evolução dia a dia da métrica no período selecionado.
+- Motivo: o velocímetro desenhava a variação percentual num arco de −100% a +100%, uma escala sem sentido real (variação não tem teto) — crescer 150% e crescer 2000% deixavam o ponteiro no mesmo lugar, e +5% quase não mexia nele. Além disso ele repetia em desenho o número que já aparecia escrito logo abaixo, e no card de CPL o ponteiro era invertido de propósito, então a mesma posição significava coisas opostas em cards diferentes.
+- O sparkline usa o mesmo espaço para mostrar o que o número sozinho não conta: se o resultado veio de uma evolução constante ou de um pico isolado.
+- Sem custo de backend — reaproveita a série diária que o dashboard já recebia, e acompanha o filtro de período automaticamente.
+- Dias sem lead não entram na linha do CPL (seriam divisão por zero); períodos com menos de dois dias mostram "sem dados no período"; e quando todos os dias têm o mesmo valor a linha fica no meio do quadro, lendo como "estável".
+
+---
+
+## 0.49 — 2026-08-24
+
+### Instagram: 24 contas no lugar de 6, todas no alcance orgânico
+- Cadastradas as 18 contas de Instagram que faltavam, cobrindo todos os portfólios do grupo (BYD, Hyundai, Jeep/Ram, Nissan, Toyota, Multimarcas, JLR, Denza) — antes só existiam as 5 do BMW/Consórcio mais a Acrediesel.
+- Cada conta usa um **token de página**, que não expira — diferente do token pessoal das contas Jeep, isso não vira manutenção a cada 60 dias.
+- A descoberta foi feita percorrendo os 13 portfólios empresariais; todas as 24 foram testadas lendo dados reais antes de serem gravadas.
+- As 17 marcas que ainda não tinham conta vinculada foram ligadas às suas contas — o card de Alcance Orgânico passou de 7 para 23 cards, cobrindo todas as 24 marcas. O vínculo de cada uma foi conferido pelo nome do próprio perfil no Instagram (ex.: @ravieraram é "Raviera Ram Acre", não a de Rondônia).
+- O card de Alcance Orgânico ficou recolhível, igual ao "Top 3 Melhores Anúncios": mostra 6 contas (duas linhas) e um botão "Ver todas (N)" / "Ver menos" — com mais de 20 contas, a lista inteira aberta empurrava o resto do dashboard para baixo demais.
+
+### Sincronização segue rápida mesmo com 4x mais contas de Instagram
+- Mesma separação de busca (paralela) e gravação (sequencial) que o Meta já usava, agora aplicada ao Instagram: a fase do Instagram ficou em ~30s em vez dos ~90s que seriam sequenciais.
+- Tempo total da sincronização completa: ~97s, com 20 contas de anúncio e 24 de Instagram.
+- Nova tentativa automática (3x, com espera crescente) para erros de sobrecarga momentânea do Meta — o "Please reduce the amount of data you're asking for", que passou a aparecer de vez em quando nas contas maiores depois que a busca voltou a ser paralela, e some sozinho ao repetir.
+
+---
+
+## 0.48 — 2026-08-24
+
+### Desempenho: "Atualizar dados" ~4x mais rápido
+- Sincronização completa caiu de mais de 5 minutos para cerca de 1 minuto e meio.
+- Miniaturas de anúncios não são mais rebaixadas a cada sincronização: eram ~700 imagens (100 MB) baixadas de novo toda vez, mesmo já estando salvas no servidor — sozinho, isso respondia por cerca de 60% da demora. Como a chave usada (ID do anúncio, do post ou do link da notícia) identifica conteúdo que não muda, o arquivo já salvo é reaproveitado.
+- Busca na API do Meta voltou a rodar em paralelo (5 contas por vez) mesmo no SQLite: agora a busca na rede (que não toca no banco) é separada da gravação, então só a gravação é feita uma conta de cada vez. Antes as duas andavam juntas, e no SQLite cada conta esperava a anterior inteira, tempo de rede incluído.
+
+### Contas Jeep (Acrediesel) voltaram a sincronizar
+- As 4 contas Jeep (Vilhena, Porto Velho, Ji-Paraná e Rio Branco) pertencem ao portfólio externo "DDM Stellantis", que concede acesso individual ao Felipe mas nunca ao usuário do sistema FEFO Integração — por isso ficaram de fora quando migramos para o token de sistema.
+- Passam a usar um token pessoal separado (`META_ACCESS_TOKEN_PESSOAL`), aplicado só a essas 4 contas; as outras 16 continuam no token de sistema, que não expira.
+- Atenção: esse token pessoal expira a cada ~60 dias e precisa ser gerado de novo pelo Explorador da API Graph. As demais contas não são afetadas quando isso acontece.
+
+---
+
 ## 0.47 — 2026-08-04
 
 ### Novo nome: FEFO

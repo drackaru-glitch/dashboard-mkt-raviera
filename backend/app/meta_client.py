@@ -3,11 +3,12 @@
 """
 
 import re
+import time
 from datetime import date, timedelta
 
 import httpx
 
-from app.config import META_ACCESS_TOKEN, META_API_VERSION
+from app.config import CONTAS_TOKEN_PESSOAL, META_ACCESS_TOKEN, META_ACCESS_TOKEN_PESSOAL, META_API_VERSION
 
 BASE_URL = f"https://graph.facebook.com/{META_API_VERSION}"
 
@@ -38,12 +39,33 @@ def _contar_leads(actions: list[dict] | None, objective: str | None) -> tuple[in
     return leads_formulario, leads_whatsapp
 
 
-def _get(path: str, params: dict) -> dict:
-    params = {**params, "access_token": META_ACCESS_TOKEN}
-    resp = httpx.get(f"{BASE_URL}/{path}", params=params, timeout=30)
-    if not resp.is_success:
-        raise RuntimeError(f"Meta API error {resp.status_code} em {path}: {resp.text[:300]}")
-    return resp.json()
+def _token_para_conta(meta_account_id: str) -> str:
+    if meta_account_id in CONTAS_TOKEN_PESSOAL and META_ACCESS_TOKEN_PESSOAL:
+        return META_ACCESS_TOKEN_PESSOAL
+    return META_ACCESS_TOKEN
+
+
+# Erros que o Meta devolve por sobrecarga momentânea, não por algo errado no pedido: code 1
+# ("Please reduce the amount of data you're asking for") e os de limite de chamadas. Aparecem
+# mais desde que a sincronização voltou a buscar várias contas ao mesmo tempo, e somem sozinhos
+# ao repetir — as contas maiores (mais de mil anúncios/dia) são as que mais esbarram neles.
+CODIGOS_TENTAR_DE_NOVO = {1, 2, 4, 17, 32, 613}
+TENTATIVAS = 3
+
+
+def _get(path: str, params: dict, meta_account_id: str) -> dict:
+    params = {**params, "access_token": _token_para_conta(meta_account_id)}
+    for tentativa in range(1, TENTATIVAS + 1):
+        resp = httpx.get(f"{BASE_URL}/{path}", params=params, timeout=30)
+        if resp.is_success:
+            return resp.json()
+        try:
+            codigo = resp.json().get("error", {}).get("code")
+        except ValueError:
+            codigo = None
+        if codigo not in CODIGOS_TENTAR_DE_NOVO or tentativa == TENTATIVAS:
+            raise RuntimeError(f"Meta API error {resp.status_code} em {path}: {resp.text[:300]}")
+        time.sleep(2 * tentativa)  # espera crescente: 2s, depois 4s
 
 
 def _parse_valor_brl(texto: str) -> float | None:
@@ -62,6 +84,7 @@ def get_ad_account_balance(meta_account_id: str) -> dict:
             "fields": "balance,amount_spent,spend_cap,currency,is_prepay_account,"
             "funding_source_details{display_string,type}"
         },
+        meta_account_id,
     )
     currency = data.get("currency", "BRL")
 
@@ -102,6 +125,7 @@ def get_daily_insights(meta_account_id: str, days: int = 30) -> list[dict]:
             "fields": "date_start,campaign_name,objective,spend,actions",
             "limit": 500,
         },
+        meta_account_id,
     )
     rows = []
     for entry in data.get("data", []):
@@ -134,6 +158,7 @@ def get_ads_daily(meta_account_id: str, since: str, until: str) -> list[dict]:
             f"insights.time_range({insights_range}).time_increment(1).limit(100){{actions,spend,date_start}}",
             "limit": 200,
         },
+        meta_account_id,
     )
     rows = []
     for ad in data.get("data", []):

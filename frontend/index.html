@@ -17,6 +17,28 @@
   @keyframes welcomeLine { from { transform: scaleX(0); } to { transform: scaleX(1); } }
   .welcome-in { animation: welcomeIn 0.45s cubic-bezier(0.16, 1, 0.3, 1) both; }
   .welcome-line { animation: welcomeLine 0.5s cubic-bezier(0.65, 0, 0.35, 1) 0.15s both; transform-origin: center; }
+
+  /* --- Linhas neon ---------------------------------------------------------
+     Traço curto na borda de cima do card, na cor de acento do próprio card (nenhuma paleta
+     nova foi criada). O degradê apaga nas pontas pra linha não virar uma "tampa" no card, e a
+     largura é limitada: num card largo, uma linha de ponta a ponta vira um borrão em vez de um
+     detalhe. O ::before é o fio nítido e o ::after é só o brilho — separados porque box-shadow
+     ilumina a caixa inteira (vira mancha retangular) em vez de acompanhar o degradê.
+     O brilho existe só no tema escuro: no claro ele sumiria no branco e deixaria a linha com
+     aspecto sujo, então lá fica só o traço, mais opaco pra não desaparecer. */
+  .neon-top { position: relative; }
+  .neon-top::before, .neon-top::after {
+    content: ""; position: absolute; left: 50%; transform: translateX(-50%);
+    width: min(70%, 230px); pointer-events: none;
+    background: linear-gradient(90deg, transparent, var(--neon, #3b82f6), transparent);
+  }
+  .neon-top::before { top: -1px; height: 1px; opacity: .85; }
+  .neon-top::after { top: -2px; height: 3px; filter: blur(4px); opacity: 0; }
+  .neon-top.is-dark::before { opacity: 1; }
+  .neon-top.is-dark::after { opacity: .7; }
+
+  /* Botão de período ativo (só no escuro, mesmo motivo do brilho acima). */
+  .neon-ativo { box-shadow: 0 0 0 1px rgba(59,130,246,.45), 0 0 14px -4px rgba(59,130,246,.95); }
 </style>
 </head>
 <body>
@@ -24,7 +46,7 @@
 
 <script type="text/babel" data-presets="react">
 const { useState, useMemo, useEffect, useRef } = React;
-const APP_VERSION = "0.47";
+const APP_VERSION = "0.51";
 
 /* ================================================================== */
 /* 1) CLIENTE DA API (backend próprio, substitui o Apps Script)         */
@@ -350,60 +372,79 @@ function Badge({ value, dark }) {
 }
 // Arco desenhado ponto a ponto (em vez de large-arc/sweep-flag do SVG) — mais fácil de
 // acertar a direção certa em qualquer sentido, positivo ou negativo.
-function _arcoPath(cx, cy, r, anguloInicial, anguloFinal, passos = 32) {
-  let d = "";
-  for (let i = 0; i <= passos; i++) {
-    const a = anguloInicial + (anguloFinal - anguloInicial) * (i / passos);
-    const x = cx + r * Math.sin(a);
-    const y = cy - r * Math.cos(a);
-    d += (i === 0 ? "M" : "L") + x.toFixed(2) + " " + y.toFixed(2) + " ";
+// Mini gráfico da evolução dia a dia da métrica dentro do período selecionado. Substituiu o
+// velocímetro que ficava aqui: ele desenhava a variação percentual num arco de -100% a +100%,
+// uma escala inventada (variação não tem teto), travava no talo em qualquer valor extremo e
+// repetia em desenho o número que já aparece escrito logo abaixo. O sparkline usa o mesmo
+// espaço pra mostrar algo que o número sozinho não conta: se o resultado veio de uma evolução
+// constante ou de um pico isolado.
+function Sparkline({ valores, cor, dark }) {
+  const w = 132, h = 38;
+  const pts = (valores || []).filter((v) => v !== null && v !== undefined && isFinite(v));
+  if (pts.length < 2) {
+    return (
+      <div style={{ height: h }} className={"w-full flex items-center justify-center text-[10px] " + (dark ? "text-neutral-600" : "text-neutral-400")}>
+        sem dados no período
+      </div>
+    );
   }
-  return d;
-}
-function Gauge({ value, dark }) {
-  const w = 132, h = 78, cx = w / 2, cy = h - 4, r = 54;
-  const temValor = value !== null && value !== undefined && isFinite(value);
-  const clamped = temValor ? Math.max(-100, Math.min(100, value)) : 0;
-  const angulo = (clamped / 100) * (Math.PI / 2); // -90°..+90°, 0 = topo
-  const positive = clamped >= 0;
-  const cor = !temValor ? (dark ? "#52525b" : "#a3a3a3") : positive ? "#10b981" : "#ef4444";
-  const trilhoPath = _arcoPath(cx, cy, r, -Math.PI / 2, Math.PI / 2);
-  const progressoPath = _arcoPath(cx, cy, r, 0, angulo);
-  const ponteiro = { x: cx + (r - 8) * Math.sin(angulo), y: cy - (r - 8) * Math.cos(angulo) };
+  const min = Math.min(...pts), max = Math.max(...pts);
+  const passo = w / (pts.length - 1);
+  // 3px de folga em cima e embaixo pra linha e o ponto final não encostarem na borda.
+  // Quando todos os dias têm o mesmo valor não há amplitude pra normalizar: aí a linha vai pro
+  // meio da caixa (lê como "estável") em vez de colar no fundo, que daria a impressão errada
+  // de ter caído a zero.
+  const coords = pts.map((v, i) => [
+    i * passo,
+    max === min ? h / 2 : h - 3 - ((v - min) / (max - min)) * (h - 6),
+  ]);
+  const linha = coords.map(([x, y], i) => (i === 0 ? "M" : "L") + x.toFixed(1) + " " + y.toFixed(1)).join(" ");
+  const area = linha + " L " + w + " " + h + " L 0 " + h + " Z";
+  const fim = coords[coords.length - 1];
+  const gradId = "spark-" + cor.replace("#", "");
   return (
-    <svg viewBox={`0 0 ${w} ${h}`} width="100%" height={h} className="block">
-      <path d={trilhoPath} fill="none" stroke={dark ? "#27272a" : "#e5e5e5"} strokeWidth="9" strokeLinecap="round" />
-      {temValor && <path d={progressoPath} fill="none" stroke={cor} strokeWidth="9" strokeLinecap="round" />}
-      <line x1={cx} y1={cy} x2={ponteiro.x} y2={ponteiro.y} stroke={dark ? "#d4d4d4" : "#525252"} strokeWidth="2.5" strokeLinecap="round" />
-      <circle cx={cx} cy={cy} r="4" fill={dark ? "#d4d4d4" : "#525252"} />
+    <svg viewBox={"0 0 " + w + " " + h} width="100%" height={h} preserveAspectRatio="none" className="block">
+      <defs>
+        <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={cor} stopOpacity="0.25" />
+          <stop offset="100%" stopColor={cor} stopOpacity="0" />
+        </linearGradient>
+      </defs>
+      <path d={area} fill={"url(#" + gradId + ")"} />
+      <path d={linha} fill="none" stroke={cor} strokeWidth="1.6" strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke" />
+      <circle cx={fim[0]} cy={fim[1]} r="2.4" fill={cor} vectorEffect="non-scaling-stroke" />
     </svg>
   );
 }
-function KpiCard({ IconComp, label, value, badgeValue, previousValue, previousLabel, dark, accent, gauge, menorMelhor }) {
+function KpiCard({ IconComp, label, value, badgeValue, previousValue, previousLabel, dark, accent, gauge, menorMelhor, serie }) {
   if (gauge) {
     const temValor = badgeValue !== null && badgeValue !== undefined && isFinite(badgeValue);
     // badgeValue é sempre a variação REAL do número (ex.: CPL subiu 20% → +20%, mostrado
     // assim mesmo). Mas pra métricas onde menor é melhor (ex.: CPL), quem sobe é ruim — por
-    // isso a cor/ponteiro do velocímetro usam o valor invertido só pra essa decisão, sem
-    // mexer no texto da porcentagem exibida.
+    // isso a COR do percentual usa o valor invertido só pra essa decisão, sem mexer no texto.
     const valorParaCor = menorMelhor ? -badgeValue : badgeValue;
     const positive = temValor && valorParaCor >= 0;
     const corPct = !temValor ? (dark ? "text-neutral-500" : "text-neutral-400") : positive ? (dark ? "text-emerald-400" : "text-emerald-600") : (dark ? "text-red-400" : "text-red-600");
     return (
-      <div className={"rounded-xl border p-4 flex flex-col items-center gap-1 " + (dark ? "bg-neutral-900/70 border-neutral-800" : "bg-white border-neutral-200 shadow-sm")}>
+      <div className={"neon-top rounded-xl border p-4 flex flex-col gap-2 " + (dark ? "is-dark bg-neutral-900/70 border-neutral-800" : "bg-white border-neutral-200 shadow-sm")} style={{ "--neon": accent }}>
         <div className="w-full flex items-center justify-between">
           <div className={"h-8 w-8 rounded-lg flex items-center justify-center shrink-0 " + (dark ? "bg-neutral-800" : "bg-neutral-100")} style={{ color: accent }}>
             <IconComp className="h-4 w-4" />
           </div>
           <p className={"text-[11px] font-medium uppercase tracking-wide text-right " + (dark ? "text-neutral-500" : "text-neutral-500")}>{label}</p>
         </div>
-        <Gauge value={temValor ? valorParaCor : null} dark={dark} />
-        <p className={"text-sm font-bold tabular-nums -mt-1 " + corPct}>
-          {temValor ? (badgeValue >= 0 ? "+" : "-") + Math.abs(badgeValue).toFixed(1).replace(".", ",") + "%" : "—"}
-        </p>
-        <p className={"text-xl font-bold tabular-nums tracking-tight " + (dark ? "text-neutral-50" : "text-neutral-900")}>{value}</p>
+        <div className="w-full">
+          <p className={"text-2xl font-bold tabular-nums tracking-tight " + (dark ? "text-neutral-50" : "text-neutral-900")}>{value}</p>
+          <div className="flex items-baseline gap-1.5">
+            <span className={"text-sm font-bold tabular-nums " + corPct}>
+              {temValor ? (badgeValue >= 0 ? "+" : "-") + Math.abs(badgeValue).toFixed(1).replace(".", ",") + "%" : "—"}
+            </span>
+            <span className={"text-[10px] " + (dark ? "text-neutral-500" : "text-neutral-400")}>vs. período anterior</span>
+          </div>
+        </div>
+        <Sparkline valores={serie} cor={accent} dark={dark} />
         {previousValue !== undefined && (
-          <div className={"inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-semibold tabular-nums " + (dark ? "bg-neutral-800 text-neutral-200" : "bg-neutral-100 text-neutral-700")}>
+          <div className={"self-start inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-semibold tabular-nums " + (dark ? "bg-neutral-800 text-neutral-200" : "bg-neutral-100 text-neutral-700")}>
             <span className={dark ? "text-neutral-500" : "text-neutral-400"}>{previousLabel}:</span> {previousValue}
           </div>
         )}
@@ -411,7 +452,7 @@ function KpiCard({ IconComp, label, value, badgeValue, previousValue, previousLa
     );
   }
   return (
-    <div className={"rounded-xl border p-4 flex flex-col gap-3 " + (dark ? "bg-neutral-900/70 border-neutral-800" : "bg-white border-neutral-200 shadow-sm")}>
+    <div className={"neon-top rounded-xl border p-4 flex flex-col gap-3 " + (dark ? "is-dark bg-neutral-900/70 border-neutral-800" : "bg-white border-neutral-200 shadow-sm")} style={{ "--neon": accent }}>
       <div className="flex items-center justify-between">
         <div className={"h-9 w-9 rounded-lg flex items-center justify-center " + (dark ? "bg-neutral-800" : "bg-neutral-100")} style={{ color: accent }}>
           <IconComp className="h-5 w-5" />
@@ -582,12 +623,17 @@ function NewsItemRow({ item, dark, mutedText }) {
     </a>
   );
 }
+// Na visão geral (várias marcas lado a lado), cada marca mostra no máximo 3 notícias — o
+// backend manda até 8, mas com muitas marcas na tela isso vira uma parede de manchetes. Ao
+// filtrar por uma marca só, a tela troca pro carrossel (NewsCarousel), que segue mostrando todas.
+const NOTICIAS_POR_MARCA = 3;
+
 function NewsBrandGroup({ item, dark, mutedText }) {
   return (
     <div className="flex flex-col gap-1">
       <p className={"text-[11px] font-semibold uppercase tracking-wide mb-1 " + mutedText}>{item.marca}</p>
       <div className="flex flex-col divide-y divide-transparent">
-        {item.itens.map((n, i) => (
+        {item.itens.slice(0, NOTICIAS_POR_MARCA).map((n, i) => (
           <NewsItemRow key={i} item={n} dark={dark} mutedText={mutedText} />
         ))}
       </div>
@@ -1279,7 +1325,7 @@ function GoogleAdsDashboard({ token, dark, cardBg, mutedText, pushToast, permiss
         <div className="flex items-center gap-1.5"><IconCalendar className={"h-4 w-4 " + mutedText} /><span className={"text-xs font-medium " + mutedText}>Período:</span></div>
         <div className="flex flex-wrap gap-1">
           {[{ id: "mesAtual", label: "Mês Atual" }, { id: "mesAnterior", label: "Mês Anterior" }, { id: "comparativo", label: "Comparativo" }, { id: "custom", label: "Customizado" }].map((p) => (
-            <button key={p.id} onClick={() => setPeriodo(p.id)} className={"px-3 py-1.5 rounded-md text-xs font-semibold transition-colors " + (periodo === p.id ? "bg-blue-600 text-white" : (dark ? "bg-neutral-800 text-neutral-300 hover:bg-neutral-700" : "bg-neutral-100 text-neutral-600 hover:bg-neutral-200"))}>{p.label}</button>
+            <button key={p.id} onClick={() => setPeriodo(p.id)} className={"px-3 py-1.5 rounded-md text-xs font-semibold transition-colors " + (periodo === p.id ? "bg-blue-600 text-white" + (dark ? " neon-ativo" : "") : (dark ? "bg-neutral-800 text-neutral-300 hover:bg-neutral-700" : "bg-neutral-100 text-neutral-600 hover:bg-neutral-200"))}>{p.label}</button>
           ))}
         </div>
         <span className={"text-xs " + mutedText}>
@@ -1640,7 +1686,7 @@ function FunilVendasDashboard({ token, dark, cardBg, mutedText, pushToast, permi
         <div className="flex items-center gap-1.5"><IconCalendar className={"h-4 w-4 " + mutedText} /><span className={"text-xs font-medium " + mutedText}>Período:</span></div>
         <div className="flex flex-wrap gap-1">
           {[{ id: "mesAtual", label: "Mês Atual" }, { id: "mesAnterior", label: "Mês Anterior" }, { id: "comparativo", label: "Comparativo" }, { id: "custom", label: "Customizado" }].map((p) => (
-            <button key={p.id} onClick={() => setPeriodo(p.id)} className={"px-3 py-1.5 rounded-md text-xs font-semibold transition-colors " + (periodo === p.id ? "bg-blue-600 text-white" : (dark ? "bg-neutral-800 text-neutral-300 hover:bg-neutral-700" : "bg-neutral-100 text-neutral-600 hover:bg-neutral-200"))}>{p.label}</button>
+            <button key={p.id} onClick={() => setPeriodo(p.id)} className={"px-3 py-1.5 rounded-md text-xs font-semibold transition-colors " + (periodo === p.id ? "bg-blue-600 text-white" + (dark ? " neon-ativo" : "") : (dark ? "bg-neutral-800 text-neutral-300 hover:bg-neutral-700" : "bg-neutral-100 text-neutral-600 hover:bg-neutral-200"))}>{p.label}</button>
           ))}
         </div>
         <span className={"text-xs " + mutedText}>
@@ -1760,7 +1806,7 @@ function FunilVendasDashboard({ token, dark, cardBg, mutedText, pushToast, permi
       </div>
 
       {permissoes.verNoticias && noticiasToShow.length > 0 && (
-        <div className={"rounded-xl border p-4 " + (marcaFiltro !== "todas" ? "overflow-hidden " : "") + cardBg}>
+        <div className={"neon-top rounded-xl border p-4 " + (dark ? "is-dark " : "") + (marcaFiltro !== "todas" ? "overflow-hidden " : "") + cardBg} style={{ "--neon": "#f59e0b" }}>
           <h2 className="text-sm font-bold mb-1 flex items-center gap-1.5"><IconSparkle className="h-4 w-4 text-amber-500" /> Notícias do Setor</h2>
           <p className={"text-xs mb-3 " + mutedText}>Manchetes recentes de portais automotivos (Quatro Rodas, Motor1, AutoPapo) que citam as marcas do grupo — atualiza sozinho às 08h e 15h, ou ao clicar em "Atualizar"</p>
           {marcaFiltro !== "todas" ? (
@@ -2106,6 +2152,15 @@ function RavieraDashboard({ token, role, email, nome, permissoes, justLoggedIn, 
     return Object.values(byDate).sort((a, b) => a.data.localeCompare(b.data)).map((d) => ({ ...d, dataLabel: fmtDateOnly(d.data) }));
   }, [currentRecords]);
 
+  // Séries diárias dos sparklines dos KPIs — saem da mesma evolucaoDiaria já usada no gráfico
+  // maior, então acompanham o período selecionado sem nenhuma chamada extra ao backend.
+  const seriesKpi = useMemo(() => ({
+    gasto: evolucaoDiaria.map((d) => d.gasto),
+    quantidade: evolucaoDiaria.map((d) => d.quantidade),
+    // dia sem lead não tem CPL definido (seria divisão por zero) — vira null e o sparkline ignora.
+    cpl: evolucaoDiaria.map((d) => (d.quantidade > 0 ? d.gasto / d.quantidade : null)),
+  }), [evolucaoDiaria]);
+
   const rankingMarcas = useMemo(() => {
     return brandsList.map((marca) => {
       const recs = filterByRange(dashboardData.trafego.filter((r) => r.marca === marca), range);
@@ -2199,10 +2254,16 @@ function RavieraDashboard({ token, role, email, nome, permissoes, justLoggedIn, 
   );
   const [creativesExpanded, setCreativesExpanded] = useState(false);
   const [noticiasExpanded, setNoticiasExpanded] = useState(false);
-  useEffect(() => { setCreativesExpanded(false); setNoticiasExpanded(false); }, [brandsToShow]);
+  const [organicoExpanded, setOrganicoExpanded] = useState(false);
+  useEffect(() => { setCreativesExpanded(false); setNoticiasExpanded(false); setOrganicoExpanded(false); }, [brandsToShow]);
   const CREATIVES_PREVIEW_COUNT = 3;
   const creativesToRender = creativesExpanded ? topCreativesToShow : topCreativesToShow.slice(0, CREATIVES_PREVIEW_COUNT);
   const hasMoreCreatives = topCreativesToShow.length > CREATIVES_PREVIEW_COUNT;
+  // 6 = duas linhas cheias da grade de 3 colunas (são mais de 20 contas quando não há filtro
+  // de marca, então mostrar só 3 cortaria demais).
+  const ORGANICO_PREVIEW_COUNT = 6;
+  const organicoToRender = organicoExpanded ? organicoToShow : organicoToShow.slice(0, ORGANICO_PREVIEW_COUNT);
+  const hasMoreOrganico = organicoToShow.length > ORGANICO_PREVIEW_COUNT;
   const NOTICIAS_PREVIEW_COUNT = 3;
   const noticiasToRender = noticiasExpanded ? noticiasToShow : noticiasToShow.slice(0, NOTICIAS_PREVIEW_COUNT);
   const hasMoreNoticias = noticiasToShow.length > NOTICIAS_PREVIEW_COUNT;
@@ -2303,7 +2364,7 @@ function RavieraDashboard({ token, role, email, nome, permissoes, justLoggedIn, 
               <div className="flex items-center gap-1.5"><IconCalendar className={"h-4 w-4 " + mutedText} /><span className={"text-xs font-medium " + mutedText}>Período:</span></div>
               <div className="flex flex-wrap gap-1">
                 {[{ id: "mesAtual", label: "Mês Atual" }, { id: "mesAnterior", label: "Mês Anterior" }, { id: "comparativo", label: "Comparativo" }, { id: "custom", label: "Customizado" }].map((p) => (
-                  <button key={p.id} onClick={() => setPeriodo(p.id)} className={"px-3 py-1.5 rounded-md text-xs font-semibold transition-colors " + (periodo === p.id ? "bg-blue-600 text-white" : (dark ? "bg-neutral-800 text-neutral-300 hover:bg-neutral-700" : "bg-neutral-100 text-neutral-600 hover:bg-neutral-200"))}>{p.label}</button>
+                  <button key={p.id} onClick={() => setPeriodo(p.id)} className={"px-3 py-1.5 rounded-md text-xs font-semibold transition-colors " + (periodo === p.id ? "bg-blue-600 text-white" + (dark ? " neon-ativo" : "") : (dark ? "bg-neutral-800 text-neutral-300 hover:bg-neutral-700" : "bg-neutral-100 text-neutral-600 hover:bg-neutral-200"))}>{p.label}</button>
                 ))}
               </div>
               <span className={"text-xs " + mutedText}>
@@ -2352,11 +2413,11 @@ function RavieraDashboard({ token, role, email, nome, permissoes, justLoggedIn, 
 
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
               {permissoes.verInvestimento && (
-                <KpiCard gauge IconComp={IconDollar} label="Investimento" value={fmtBRL(currentAgg.gasto)} badgeValue={variacao(currentAgg.gasto, previousAgg.gasto)} previousValue={periodo === "comparativo" ? fmtBRL(previousAgg.gasto) : undefined} previousLabel={previousLabel} dark={dark} accent="#3b82f6" />
+                <KpiCard gauge serie={seriesKpi.gasto} IconComp={IconDollar} label="Investimento" value={fmtBRL(currentAgg.gasto)} badgeValue={variacao(currentAgg.gasto, previousAgg.gasto)} previousValue={periodo === "comparativo" ? fmtBRL(previousAgg.gasto) : undefined} previousLabel={previousLabel} dark={dark} accent="#3b82f6" />
               )}
-              <KpiCard gauge IconComp={IconUsers} label="Leads Gerados" value={fmtNum(currentAgg.quantidade)} badgeValue={variacao(currentAgg.quantidade, previousAgg.quantidade)} previousValue={periodo === "comparativo" ? fmtNum(previousAgg.quantidade) : undefined} previousLabel={previousLabel} dark={dark} accent="#6366f1" />
+              <KpiCard gauge serie={seriesKpi.quantidade} IconComp={IconUsers} label="Leads Gerados" value={fmtNum(currentAgg.quantidade)} badgeValue={variacao(currentAgg.quantidade, previousAgg.quantidade)} previousValue={periodo === "comparativo" ? fmtNum(previousAgg.quantidade) : undefined} previousLabel={previousLabel} dark={dark} accent="#6366f1" />
               {permissoes.verInvestimento && (
-                <KpiCard gauge menorMelhor IconComp={IconTarget} label="CPL Médio" value={fmtBRL(currentAgg.cpl)} badgeValue={variacao(currentAgg.cpl, previousAgg.cpl)} previousValue={periodo === "comparativo" ? fmtBRL(previousAgg.cpl) : undefined} previousLabel={previousLabel} dark={dark} accent="#a855f7" />
+                <KpiCard gauge serie={seriesKpi.cpl} menorMelhor IconComp={IconTarget} label="CPL Médio" value={fmtBRL(currentAgg.cpl)} badgeValue={variacao(currentAgg.cpl, previousAgg.cpl)} previousValue={periodo === "comparativo" ? fmtBRL(previousAgg.cpl) : undefined} previousLabel={previousLabel} dark={dark} accent="#a855f7" />
               )}
               {permissoes.verSaldo && (
                 <KpiCard IconComp={IconAlertCircle} label="Contas em Alerta de Saldo" value={fmtNum(contasEmRisco)} dark={dark} accent="#ef4444" />
@@ -2364,7 +2425,7 @@ function RavieraDashboard({ token, role, email, nome, permissoes, justLoggedIn, 
             </div>
 
             {topCreativesToShow.length > 0 && (
-              <div className={"rounded-xl border p-4 " + cardBg}>
+              <div className={"neon-top rounded-xl border p-4 " + (dark ? "is-dark " : "") + cardBg} style={{ "--neon": "#f59e0b" }}>
                 <h2 className="text-sm font-bold mb-1 flex items-center gap-1.5"><IconAward className="h-4 w-4 text-amber-500" /> Top 3 Melhores Anúncios por Marca</h2>
                 <p className={"text-xs mb-3 " + mutedText}>Os 3 criativos com melhor performance de cada marca no período selecionado acima — investimento, leads e custo por lead</p>
                 <div className="flex flex-col gap-4">
@@ -2384,19 +2445,27 @@ function RavieraDashboard({ token, role, email, nome, permissoes, justLoggedIn, 
             )}
 
             {organicoToShow.length > 0 && (
-              <div className={"rounded-xl border p-4 " + cardBg}>
+              <div className={"neon-top rounded-xl border p-4 " + (dark ? "is-dark " : "") + cardBg} style={{ "--neon": "#ec4899" }}>
                 <h2 className="text-sm font-bold mb-1 flex items-center gap-1.5"><IconInstagram className="h-4 w-4 text-pink-500" /> Alcance Orgânico no Instagram</h2>
                 <p className={"text-xs mb-3 " + mutedText}>Post com mais curtidas e seguidores conquistados no período, por conta</p>
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                  {organicoToShow.map((item) => (
+                  {organicoToRender.map((item) => (
                     <OrganicAccountCard key={item.instagramAccountId} item={item} dark={dark} cardBg={cardBg} mutedText={mutedText} />
                   ))}
                 </div>
+                {hasMoreOrganico && (
+                  <button onClick={() => setOrganicoExpanded((v) => !v)}
+                    className={"mt-4 w-full flex items-center justify-center gap-1.5 py-2 rounded-md text-xs font-semibold border transition-colors " +
+                      (dark ? "bg-neutral-800 border-neutral-700 text-neutral-200 hover:bg-neutral-700" : "bg-neutral-100 border-neutral-200 text-neutral-700 hover:bg-neutral-200")}>
+                    {organicoExpanded ? "Ver menos" : "Ver todas (" + organicoToShow.length + ")"}
+                    <IconChevronDown className={"h-3.5 w-3.5 transition-transform" + (organicoExpanded ? " rotate-180" : "")} />
+                  </button>
+                )}
               </div>
             )}
 
             {permissoes.verNoticias && noticiasToShow.length > 0 && (
-              <div className={"rounded-xl border p-4 " + (marcaFiltro !== "todas" ? "overflow-hidden " : "") + cardBg}>
+              <div className={"neon-top rounded-xl border p-4 " + (dark ? "is-dark " : "") + (marcaFiltro !== "todas" ? "overflow-hidden " : "") + cardBg} style={{ "--neon": "#f59e0b" }}>
                 <h2 className="text-sm font-bold mb-1 flex items-center gap-1.5"><IconSparkle className="h-4 w-4 text-amber-500" /> Notícias do Setor</h2>
                 <p className={"text-xs mb-3 " + mutedText}>Manchetes recentes de portais automotivos (Quatro Rodas, Motor1, AutoPapo) que citam as marcas do grupo — atualiza sozinho às 08h e 15h, ou ao clicar em "Atualizar"</p>
                 {marcaFiltro !== "todas" ? (
@@ -2432,7 +2501,7 @@ function RavieraDashboard({ token, role, email, nome, permissoes, justLoggedIn, 
             </div>
 
             {brandsToShow.length > 1 && (
-              <div className={"rounded-xl border p-4 " + cardBg}>
+              <div className={"neon-top rounded-xl border p-4 " + (dark ? "is-dark " : "") + cardBg} style={{ "--neon": "#3b82f6" }}>
                 <h2 className="text-sm font-bold mb-1">Desempenho por Marca</h2>
                 <p className={"text-xs mb-3 " + mutedText}>Ranking de leads e investimento no período — passe o mouse para ver os valores</p>
                 <ChartLegend dark={dark} items={[
@@ -2444,10 +2513,11 @@ function RavieraDashboard({ token, role, email, nome, permissoes, justLoggedIn, 
             )}
 
             {permissoes.verSaldo && (
-            <div className={"rounded-xl border p-4 overflow-x-auto " + cardBg}>
+            <div className={"neon-top rounded-xl border p-4 " + (dark ? "is-dark " : "") + cardBg} style={{ "--neon": "#10b981" }}>
               <h2 className="text-sm font-bold mb-1">Saldo das Contas de Anúncios (Meta Ads)</h2>
               <p className={"text-xs mb-4 " + mutedText}>Runway estimado: saldo atual ÷ diário esperado · Crítico ≤{RUNWAY_CRITICO}d · Atenção ≤{RUNWAY_ATENCAO}d</p>
-              <table className="w-full text-sm min-w-[680px]">
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm min-w-[680px]">
                 <thead><tr className={"text-left text-xs uppercase tracking-wide " + mutedText}>
                   <SortableTh label="Marca" sortKey="marca" sortConfig={sortConfig} onSort={handleSort} />
                   <SortableTh label="Investimento" sortKey="gasto" sortConfig={sortConfig} onSort={handleSort} />
@@ -2488,6 +2558,7 @@ function RavieraDashboard({ token, role, email, nome, permissoes, justLoggedIn, 
                   </tr>
                 </tfoot>
               </table>
+              </div>
             </div>
             )}
 

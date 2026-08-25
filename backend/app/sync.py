@@ -11,7 +11,7 @@ from datetime import date, datetime, timedelta
 
 from sqlalchemy.orm import Session
 
-from app.config import GOOGLE_ADS_DEMO_MODE, META_DEMO_MODE, NBS_DEMO_MODE
+from app.config import DATABASE_URL, GOOGLE_ADS_DEMO_MODE, META_DEMO_MODE, NBS_DEMO_MODE
 from app.database import SessionLocal
 from app.models import (
     AdAccount,
@@ -44,10 +44,18 @@ _sync_lock = threading.Lock()
 _sync_started_at: float | None = None
 
 # Cada conta sincroniza numa thread separada (com sua própria sessão do banco) em vez de
-# uma de cada vez — é isso que deixa a sincronização muito mais rápida. O número fica
-# moderado de propósito: alto o suficiente pra ganhar velocidade real, baixo o suficiente
-# pra não martelar a API do Meta e cair de novo no limite de taxa (já aconteceu antes).
-MAX_SYNC_WORKERS = 5
+# uma de cada vez — é isso que deixa a sincronização muito mais rápida. Mas o SQLite só
+# aceita um escritor por vez: sincronizar várias contas ao mesmo tempo nele causa erros de
+# "database is locked" e de arquivo de mídia (duas threads escrevendo o mesmo caminho). Por
+# isso o paralelismo só é ligado de verdade quando o banco é Postgres (que aguenta escrita
+# concorrente); no SQLite, cai pra 1 (sequencial, como era antes) — sem regressão.
+MAX_SYNC_WORKERS = 5 if not DATABASE_URL.startswith("sqlite") else 1
+
+# Buscar os dados na API do Meta é a parte lenta (~12s por conta), e não toca no banco —
+# então pode rodar em paralelo mesmo no SQLite. Só a GRAVAÇÃO precisa ser uma de cada vez.
+# Antes as duas coisas andavam juntas na mesma thread, então no SQLite (MAX_SYNC_WORKERS=1)
+# cada conta esperava a anterior inteira, tempo de rede incluído.
+MAX_FETCH_WORKERS = 5
 
 # Se uma sincronização ficar "presa" por mais que isso (algo travou sem lançar exceção),
 # a próxima tentativa destrava e segue em vez de bloquear pra sempre com a mensagem de
@@ -82,15 +90,37 @@ def _demo_row_for_brand(brand: Brand, day: date, rng: random.Random) -> dict:
     return {"gasto": gasto, "leads_formulario": leads_formulario, "leads_whatsapp": leads_whatsapp}
 
 
-def _sync_meta_account(db: Session, account: AdAccount, account_brands: list[Brand], days: int, since_criativos: str, until_criativos: str) -> int:
+def _buscar_meta_account(meta_account_id: str, days: int, since_criativos: str, until_criativos: str) -> dict:
+    """Faz as três chamadas à API do Meta de uma conta. Só rede, sem tocar no banco — é isso
+    que permite buscar várias contas ao mesmo tempo mesmo usando SQLite."""
+    return {
+        "saldo": meta_client.get_ad_account_balance(meta_account_id),
+        "insights": meta_client.get_daily_insights(meta_account_id, days=days),
+        "ads_daily": meta_client.get_ads_daily(meta_account_id, since_criativos, until_criativos),
+    }
+
+
+def _sync_meta_account(
+    db: Session,
+    account: AdAccount,
+    account_brands: list[Brand],
+    days: int,
+    since_criativos: str,
+    until_criativos: str,
+    dados: dict | None = None,
+) -> int:
+    """Grava no banco os dados de uma conta. `dados` vem da fase de busca (_buscar_meta_account);
+    se não vier, busca na hora — o que faz esta função voltar a ser rede + banco junto."""
     dias_sincronizados = 0
+    if dados is None and not META_DEMO_MODE:
+        dados = _buscar_meta_account(account.meta_account_id, days, since_criativos, until_criativos)
 
     # --- saldo ---
     if META_DEMO_MODE:
         saldo = round(500 + (account.id * 733) % 5000, 2)
         moeda = "BRL"
     else:
-        result = meta_client.get_ad_account_balance(account.meta_account_id)
+        result = dados["saldo"]
         saldo = result["saldo"]
         moeda = result["moeda"]
     cache = db.query(SaldoCache).filter(SaldoCache.ad_account_id == account.id).first()
@@ -111,7 +141,7 @@ def _sync_meta_account(db: Session, account: AdAccount, account_brands: list[Bra
                 _upsert_daily_metric(db, brand.id, day, row, fonte="demo")
                 dias_sincronizados += 1
     else:
-        insights = meta_client.get_daily_insights(account.meta_account_id, days=days)
+        insights = dados["insights"]
         for brand in account_brands:
             brand_rows = [r for r in insights if _brand_matches_campaign(brand, r["campaign_name"])]
             by_date: dict[str, dict] = {}
@@ -133,30 +163,12 @@ def _sync_meta_account(db: Session, account: AdAccount, account_brands: list[Bra
         for brand in account_brands:
             _gerar_criativos_demo(db, brand, since_criativos, until_criativos)
     else:
-        ads_daily = meta_client.get_ads_daily(account.meta_account_id, since_criativos, until_criativos)
+        ads_daily = dados["ads_daily"]
         for brand in account_brands:
             brand_rows = [r for r in ads_daily if _brand_matches_campaign(brand, r["campaign_name"])]
             _upsert_ad_daily_metrics(db, brand.id, brand_rows, since_criativos)
 
     return dias_sincronizados
-
-
-def _sync_meta_account_thread(account_id: int, brand_ids: list[int], days: int, since_criativos: str, until_criativos: str) -> tuple[bool, str, int]:
-    """Roda numa thread própria com sua PRÓPRIA sessão do banco (SQLAlchemy não permite
-    compartilhar uma sessão entre threads) — é isso que permite sincronizar várias contas do
-    Meta ao mesmo tempo em vez de uma de cada vez."""
-    db = SessionLocal()
-    try:
-        account = db.query(AdAccount).filter(AdAccount.id == account_id).first()
-        account_brands = db.query(Brand).filter(Brand.id.in_(brand_ids)).all()
-        dias = _sync_meta_account(db, account, account_brands, days, since_criativos, until_criativos)
-        db.commit()
-        return True, "", dias
-    except Exception as exc:
-        db.rollback()
-        return False, str(exc), 0
-    finally:
-        db.close()
 
 
 def sync_all(db: Session, days: int = 30) -> dict:
@@ -204,27 +216,48 @@ def _sync_all(db: Session, days: int = 30) -> dict:
     since_criativos = date(ano_mes_anterior, mes_anterior, 1).isoformat()
     until_criativos = hoje.isoformat()
 
-    # Cada conta sincroniza numa thread separada, com sua própria sessão do banco e seu
-    # próprio commit isolado: uma conta com erro (rate limit, token vencido) não derruba as
-    # outras, e sincronizar em paralelo é o que deixa isso muito mais rápido (uma conta de
-    # cada vez, sequencialmente, era o principal motivo da demora).
-    with ThreadPoolExecutor(max_workers=MAX_SYNC_WORKERS) as executor:
-        futures = {
-            executor.submit(
-                _sync_meta_account_thread, account_id, [b.id for b in account_brands], days, since_criativos, until_criativos
-            ): account_id
-            for account_id, account_brands in brands_by_account.items()
-            if account_id in accounts_by_id
-        }
-        for fut in as_completed(futures):
-            ok, erro, dias = fut.result()
-            account = accounts_by_id[futures[fut]]
-            if ok:
-                synced_accounts += 1
-                synced_days += dias
-            else:
-                falhas.append(f"{account.nome}: {erro}")
-                print(f"[sync] falha na conta Meta '{account.nome}' ({account.meta_account_id}): {erro}")
+    contas_a_sincronizar = [
+        (account_id, account_brands)
+        for account_id, account_brands in brands_by_account.items()
+        if account_id in accounts_by_id
+    ]
+
+    # Fase 1: buscar na API do Meta, várias contas ao mesmo tempo. Nada disso toca no banco,
+    # então é seguro em paralelo mesmo no SQLite — e é aqui que estava quase todo o tempo.
+    # Uma conta que falhar (token vencido, rate limit) não atrapalha as outras.
+    dados_por_conta: dict[int, dict] = {}
+    if not META_DEMO_MODE:
+        with ThreadPoolExecutor(max_workers=MAX_FETCH_WORKERS) as executor:
+            futures = {
+                executor.submit(
+                    _buscar_meta_account, accounts_by_id[account_id].meta_account_id, days, since_criativos, until_criativos
+                ): account_id
+                for account_id, _ in contas_a_sincronizar
+            }
+            for fut in as_completed(futures):
+                account = accounts_by_id[futures[fut]]
+                try:
+                    dados_por_conta[futures[fut]] = fut.result()
+                except Exception as exc:
+                    falhas.append(f"{account.nome}: {exc}")
+                    print(f"[sync] falha na conta Meta '{account.nome}' ({account.meta_account_id}): {exc}")
+
+    # Fase 2: gravar, uma conta de cada vez — o SQLite só aceita um escritor, e escrever é
+    # rápido perto do tempo de rede que já passou.
+    for account_id, account_brands in contas_a_sincronizar:
+        if not META_DEMO_MODE and account_id not in dados_por_conta:
+            continue  # a busca falhou e já foi registrada acima
+        account = accounts_by_id[account_id]
+        try:
+            synced_days += _sync_meta_account(
+                db, account, account_brands, days, since_criativos, until_criativos, dados_por_conta.get(account_id)
+            )
+            db.commit()
+            synced_accounts += 1
+        except Exception as exc:
+            db.rollback()
+            falhas.append(f"{account.nome}: {exc}")
+            print(f"[sync] falha ao gravar conta Meta '{account.nome}' ({account.meta_account_id}): {exc}")
 
     try:
         contas_instagram = _sync_instagram(db, days)
@@ -455,39 +488,59 @@ def _sync_funil(db: Session, days: int) -> int:
     return len(brands)
 
 
+def _buscar_instagram_account(instagram_business_id: str, access_token: str, days: int) -> dict:
+    """Só chamadas de rede, sem tocar no banco — por isso roda em paralelo (mesma ideia do Meta)."""
+    top_post = instagram_client.get_top_post(instagram_business_id, access_token)
+    if top_post:
+        # mesmo motivo dos criativos: a URL do Meta expira, guardamos a imagem localmente.
+        top_post["thumbnail_url"] = media_cache.baixar_imagem(top_post["thumbnail_url"], "instagram", top_post["post_id"])
+    return {
+        "seguidores_atual": instagram_client.get_followers_count(instagram_business_id, access_token),
+        "seguidores_ganhos": instagram_client.get_follower_gain(instagram_business_id, access_token, days=days),
+        "top_post": top_post,
+    }
+
+
 def _sync_instagram(db: Session, days: int) -> int:
     accounts = db.query(InstagramAccount).all()
     synced = 0
-    # Mesma lógica do Meta: cada conta sincroniza numa thread própria, com sua própria
-    # sessão e commit isolado — uma conta com token vencido ou API travada não derruba nem
-    # atrasa as outras.
-    with ThreadPoolExecutor(max_workers=MAX_SYNC_WORKERS) as executor:
-        futures = {executor.submit(_sync_instagram_account_thread, a.id, days): a for a in accounts}
-        for fut in as_completed(futures):
-            ok, erro = fut.result()
-            account = futures[fut]
-            if ok:
-                synced += 1
-            else:
-                print(f"[sync] falha na conta Instagram '{account.nome}' ({account.instagram_business_id}): {erro}")
+
+    # Fase 1: buscar na API, várias contas ao mesmo tempo (não toca no banco).
+    dados_por_conta: dict[int, dict] = {}
+    com_token = [a for a in accounts if a.access_token]
+    if com_token:
+        with ThreadPoolExecutor(max_workers=MAX_FETCH_WORKERS) as executor:
+            futures = {
+                executor.submit(_buscar_instagram_account, a.instagram_business_id, a.access_token, days): a
+                for a in com_token
+            }
+            for fut in as_completed(futures):
+                account = futures[fut]
+                try:
+                    dados_por_conta[account.id] = fut.result()
+                except Exception as exc:
+                    print(f"[sync] falha na conta Instagram '{account.nome}' ({account.instagram_business_id}): {exc}")
+
+    # Fase 2: gravar, uma de cada vez.
+    for account in accounts:
+        if account.access_token and account.id not in dados_por_conta:
+            continue  # a busca falhou e já foi registrada acima
+        try:
+            _sync_instagram_account(db, account, days, dados_por_conta.get(account.id))
+            db.commit()
+            synced += 1
+        except Exception as exc:
+            db.rollback()
+            print(f"[sync] falha ao gravar conta Instagram '{account.nome}' ({account.instagram_business_id}): {exc}")
     return synced
 
 
-def _sync_instagram_account_thread(account_id: int, days: int) -> tuple[bool, str]:
-    db = SessionLocal()
-    try:
-        account = db.query(InstagramAccount).filter(InstagramAccount.id == account_id).first()
-        _sync_instagram_account(db, account, days)
-        db.commit()
-        return True, ""
-    except Exception as exc:
-        db.rollback()
-        return False, str(exc)
-    finally:
-        db.close()
+def _sync_instagram_account(db: Session, account: InstagramAccount, days: int, dados: dict | None = None) -> None:
+    """Grava no banco os dados de uma conta. `dados` vem da fase de busca; se não vier, busca
+    na hora (volta a ser rede + banco junto)."""
+    if account.access_token and dados is None:
+        dados = _buscar_instagram_account(account.instagram_business_id, account.access_token, days)
 
-
-def _sync_instagram_account(db: Session, account: InstagramAccount, days: int) -> None:
     if not account.access_token:
         rng = random.Random(account.id * 53)
         seguidores_atual = 500 + (account.id * 733) % 12000
@@ -502,12 +555,9 @@ def _sync_instagram_account(db: Session, account: InstagramAccount, days: int) -
             "publicado_em": None,
         }
     else:
-        seguidores_atual = instagram_client.get_followers_count(account.instagram_business_id, account.access_token)
-        seguidores_ganhos = instagram_client.get_follower_gain(account.instagram_business_id, account.access_token, days=days)
-        top_post = instagram_client.get_top_post(account.instagram_business_id, account.access_token)
-        if top_post:
-            # mesmo motivo dos criativos: a URL do Meta expira, guardamos a imagem localmente.
-            top_post["thumbnail_url"] = media_cache.baixar_imagem(top_post["thumbnail_url"], "instagram", top_post["post_id"])
+        seguidores_atual = dados["seguidores_atual"]
+        seguidores_ganhos = dados["seguidores_ganhos"]
+        top_post = dados["top_post"]
 
     stats = db.query(InstagramStatsCache).filter(InstagramStatsCache.instagram_account_id == account.id).first()
     if not stats:
@@ -536,8 +586,21 @@ def _upsert_ad_daily_metrics(db: Session, brand_id: int, rows: list[dict], desde
     """Grava o desempenho dia a dia de cada anúncio da marca. O dashboard recalcula o top 3
     de criativos filtrando essas linhas pelo período selecionado (igual já faz com leads e
     gasto por dia) — não existe mais um "top 3" fixo pré-calculado aqui no backend."""
-    thumbnails_cache: dict[str, str | None] = {}
+    # A API do Meta às vezes devolve mais de uma linha pro mesmo anúncio no mesmo dia (ex.:
+    # picos de paginação) — sem juntar isso antes, a segunda linha tentava inserir de novo
+    # o mesmo (marca, anúncio, dia) e estourava a restrição de unicidade da tabela.
+    linhas_por_chave: dict[tuple[str, str], dict] = {}
     for row in rows:
+        chave = (row["ad_id"], row["data"])
+        acumulado = linhas_por_chave.get(chave)
+        if not acumulado:
+            linhas_por_chave[chave] = dict(row)
+        else:
+            acumulado["gasto"] += row["gasto"]
+            acumulado["leads"] += row["leads"]
+
+    thumbnails_cache: dict[str, str | None] = {}
+    for row in linhas_por_chave.values():
         ad_id = row["ad_id"]
         if ad_id not in thumbnails_cache:
             # a URL que o Meta devolve expira depois de um tempo (~1-2 dias) — baixamos a

@@ -14,6 +14,19 @@ META_ACCESS_TOKEN = os.environ.get("META_ACCESS_TOKEN", "").strip()
 META_API_VERSION = "v21.0"
 META_DEMO_MODE = META_ACCESS_TOKEN == ""
 
+# Token pessoal (de usuário, não de usuário do sistema) usado só para as contas Jeep da
+# Acrediesel — elas pertencem ao portfólio empresarial "DDM Stellantis" (de fora do grupo
+# Raviera), que só concedeu acesso individual ao Felipe como pessoa, nunca ao usuário do
+# sistema FEFO Integração. Expira a cada ~60 dias (limite do Meta pra token de usuário) e
+# precisa ser renovado manualmente quando isso acontecer.
+META_ACCESS_TOKEN_PESSOAL = os.environ.get("META_ACCESS_TOKEN_PESSOAL", "").strip()
+CONTAS_TOKEN_PESSOAL = {
+    "act_1524618444585103",  # Jeep Vilhena
+    "act_325615852349556",  # Jeep Porto Velho
+    "act_1509957959383806",  # Jeep Ji-Parana
+    "act_1104077297007171",  # Jeep Rio Branco
+}
+
 # Tokens do Instagram ficam por conta (app.models.InstagramAccount.access_token), não aqui —
 # cada portfólio/Business Manager tem o seu.
 
