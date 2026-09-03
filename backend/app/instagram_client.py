@@ -38,13 +38,25 @@ def get_follower_gain(instagram_business_id: str, token: str, days: int = 30) ->
     return sum(int(v.get("value", 0) or 0) for v in values)
 
 
-def get_top_post(instagram_business_id: str, token: str, limit: int = 50) -> dict | None:
+def get_media(instagram_business_id: str, token: str, limit: int = 50) -> list[dict]:
+    """Últimos posts da conta. Uma chamada só, reaproveitada por quem precisa: o melhor post
+    do período e a coleta de comentários (comments_count e permalink já vêm aqui, então
+    olhar comentário de post orgânico não custa nenhuma requisição a mais)."""
     data = _get(
         f"{instagram_business_id}/media",
         token,
-        {"fields": "id,caption,media_type,media_url,thumbnail_url,like_count,comments_count,permalink,timestamp", "limit": limit},
+        {
+            "fields": "id,caption,media_type,media_url,thumbnail_url,like_count,"
+            "comments_count,permalink,timestamp",
+            "limit": limit,
+        },
     )
-    posts = data.get("data", [])
+    return data.get("data", [])
+
+
+def get_top_post(instagram_business_id: str, token: str, limit: int = 50, posts: list[dict] | None = None) -> dict | None:
+    if posts is None:
+        posts = get_media(instagram_business_id, token, limit)
     if not posts:
         return None
     best = max(posts, key=lambda p: p.get("like_count", 0) or 0)

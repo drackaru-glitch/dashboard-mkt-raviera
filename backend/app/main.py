@@ -15,7 +15,7 @@ from app.sync import SyncEmAndamento, _sync_news, sync_all
 
 Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="FEFO API", version="0.51")
+app = FastAPI(title="FEFO API", version="0.55")
 
 app.include_router(auth_router.router)
 app.include_router(admin_router.router)

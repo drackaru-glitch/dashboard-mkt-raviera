@@ -344,3 +344,150 @@ class BrandNewsItem(Base):
     publicado_em = Column(DateTime, nullable=True)
     thumbnail_url = Column(String, nullable=True)
     coletado_em = Column(DateTime, default=datetime.utcnow)
+
+
+class ComentarioSocial(Base):
+    """Um comentário público que chegou numa rede social da marca.
+
+    Hoje só existe um canal preenchido: comentário em post do Instagram. Mensagem direta —
+    Instagram Direct e Messenger — depende de App Review do Meta, que ainda não foi aprovado
+    (ver app.social_client); o campo `canal` existe pra receber "instagram_direct"/"messenger"
+    depois sem migração nenhuma.
+
+    `respondido` vem da própria API (uma resposta da nossa conta ao comentário), não de um
+    controle manual — é o que permite mostrar pendência de atendimento sem ninguém marcar nada.
+    """
+
+    __tablename__ = "comentarios_sociais"
+
+    id = Column(Integer, primary_key=True)
+    brand_id = Column(Integer, ForeignKey("brands.id"), nullable=False)
+    canal = Column(String, nullable=False, default="instagram_comentario")
+    comentario_id = Column(String, unique=True, nullable=False, index=True)
+    media_id = Column(String, nullable=True)
+    autor = Column(String, nullable=True)
+    texto = Column(String, nullable=True)
+    permalink = Column(String, nullable=True)  # link do post onde o comentário está
+    legenda_post = Column(String, nullable=True)  # ajuda a saber de qual post/oferta se trata
+    criado_em = Column(DateTime, nullable=True)  # quando a pessoa comentou
+    respondido = Column(Boolean, nullable=False, default=False)
+    respondido_em = Column(DateTime, nullable=True)
+    coletado_em = Column(DateTime, default=datetime.utcnow)
+
+    brand = relationship("Brand")
+
+
+class TokenSaude(Base):
+    """Prazo de validade de cada token do Meta que o sistema usa.
+
+    Existe porque um token do Meta morre em silêncio: o painel simplesmente zera e ninguém
+    sabe por quê. O que mata não costuma ser `expires_at` (quase sempre 0), e sim
+    `data_access_expires_at` — o prazo de 90 dias que o Meta impõe a token de USUÁRIO. Token
+    de usuário do SISTEMA não tem esse prazo.
+
+    Detalhe que já custou caro: token de página herda o prazo do token de usuário que o
+    gerou. Os 23 tokens de Instagram saíram do token pessoal do Felipe, então venciam todos
+    no mesmo dia sem que nada no código dissesse isso.
+    """
+
+    __tablename__ = "token_saude"
+
+    id = Column(Integer, primary_key=True)
+    chave = Column(String, unique=True, nullable=False)  # "sistema" | "pessoal" | "instagram:<id>"
+    rotulo = Column(String, nullable=False)  # nome legível pra tela
+    tipo = Column(String, nullable=True)  # SYSTEM_USER | USER | PAGE
+    valido = Column(Boolean, nullable=False, default=True)
+    expira_em = Column(DateTime, nullable=True)
+    acesso_expira_em = Column(DateTime, nullable=True)
+    erro = Column(String, nullable=True)
+    atualizado_em = Column(DateTime, default=datetime.utcnow)
+
+
+class MediaComentarioCache(Base):
+    """Última contagem de comentários vista em cada mídia.
+
+    É o que mantém a sincronização barata: se o número de comentários de um post não mudou
+    desde a última coleta, não há motivo pra buscar os comentários dele de novo. Sem isso,
+    toda sincronização releria todos os posts de todas as marcas.
+    """
+
+    __tablename__ = "media_comentario_cache"
+
+    id = Column(Integer, primary_key=True)
+    media_id = Column(String, unique=True, nullable=False, index=True)
+    comentarios_count = Column(Integer, default=0)
+    atualizado_em = Column(DateTime, default=datetime.utcnow)
+
+
+class Concorrente(Base):
+    """Uma loja concorrente que a gente acompanha na Biblioteca de Anúncios do Meta.
+
+    `pagina` é o nome EXATO como aparece no anúncio (ex.: "Kampai Concessionária Toyota") —
+    é por ele que os anúncios importados são casados com o concorrente, já que a Biblioteca
+    pública não expõe o ID numérico da página.
+    """
+
+    __tablename__ = "concorrentes"
+
+    id = Column(Integer, primary_key=True)
+    nome = Column(String, nullable=False)  # nome de exibição (ex: "Kampai Toyota Campo Grande")
+    pagina = Column(String, unique=True, nullable=False)  # nome do anunciante na Biblioteca
+    cidade = Column(String, nullable=True)
+    marca_chave = Column(String, nullable=True)  # fabricante que ele representa (ex: "Toyota")
+    # Marca nossa que compete com ele nessa praça — permite comparar oferta lado a lado.
+    brand_id = Column(Integer, ForeignKey("brands.id"), nullable=True)
+    ativo = Column(Boolean, nullable=False, default=True)
+    criado_em = Column(DateTime, default=datetime.utcnow)
+
+    brand = relationship("Brand")
+    anuncios = relationship("ConcorrenteAnuncio", back_populates="concorrente", cascade="all, delete-orphan")
+
+
+class ConcorrenteAnuncio(Base):
+    """Um criativo do concorrente visto na Biblioteca de Anúncios.
+
+    `visto_primeiro` / `visto_ultimo` são o coração da tabela: como a Biblioteca só mostra o
+    que está ativo AGORA (não dá pra recuperar histórico), a longevidade de um criativo só
+    aparece acumulando coletas. Anúncio que sobrevive semanas é anúncio que converte pra eles
+    — é a informação mais útil daqui, e a única que exige paciência pra existir.
+
+    `ativo=False` marca o criativo que sumiu da Biblioteca desde a última importação.
+    """
+
+    __tablename__ = "concorrente_anuncios"
+    __table_args__ = (UniqueConstraint("concorrente_id", "ad_library_id", name="uq_conc_ad"),)
+
+    id = Column(Integer, primary_key=True)
+    concorrente_id = Column(Integer, ForeignKey("concorrentes.id"), nullable=False)
+    ad_library_id = Column(String, nullable=False)  # "Identificação da biblioteca" do anúncio
+    inicio = Column(Date, nullable=True)  # "Veiculação iniciada em"
+    modelo = Column(String, nullable=True)  # Hilux, Corolla Cross, SW4...
+    tipo_campanha = Column(String, nullable=True)  # PcD, Taxista, Produtor rural/CNPJ, Consórcio...
+    preco_de = Column(Float, nullable=True)
+    preco_por = Column(Float, nullable=True)
+    bonus = Column(Float, nullable=True)  # bônus na troca do usado
+    cta = Column(String, nullable=True)
+    dominio = Column(String, nullable=True)
+    texto = Column(String, nullable=True)
+    varias_versoes = Column(Boolean, default=False)
+
+    visto_primeiro = Column(Date, nullable=False)
+    visto_ultimo = Column(Date, nullable=False)
+    ativo = Column(Boolean, nullable=False, default=True)
+
+    concorrente = relationship("Concorrente", back_populates="anuncios")
+
+
+class ConcorrenteColeta(Base):
+    """Registro de cada importação — serve pra mostrar "última coleta em X" na tela e pra
+    saber quais anúncios marcar como inativos (os que não vieram na coleta mais recente)."""
+
+    __tablename__ = "concorrente_coletas"
+
+    id = Column(Integer, primary_key=True)
+    concorrente_id = Column(Integer, ForeignKey("concorrentes.id"), nullable=True)
+    data = Column(Date, nullable=False)
+    anuncios_encontrados = Column(Integer, default=0)
+    anuncios_novos = Column(Integer, default=0)
+    anuncios_encerrados = Column(Integer, default=0)
+    criado_em = Column(DateTime, default=datetime.utcnow)

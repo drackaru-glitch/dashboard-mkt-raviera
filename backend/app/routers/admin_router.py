@@ -3,12 +3,16 @@ from sqlalchemy.orm import Session
 
 from app.auth import hash_password, require_admin
 from app.database import get_db
-from app.models import AdAccount, Brand, GoogleAdsAccount, InstagramAccount, User, UserBrand
+from app import concorrentes as concorrentes_svc
+from app.models import AdAccount, Brand, Concorrente, GoogleAdsAccount, InstagramAccount, User, UserBrand
 from app.schemas import (
     AdAccountIn,
     AdAccountOut,
     BrandIn,
     BrandOut,
+    ConcorrenteIn,
+    ConcorrenteOut,
+    ConcorrenteTextoIn,
     GoogleAdsAccountIn,
     GoogleAdsAccountOut,
     InstagramAccountIn,
@@ -273,3 +277,55 @@ def delete_user(user_id: int, db: Session = Depends(get_db)):
     db.delete(user)
     db.commit()
     return {"ok": True}
+
+
+# --- Concorrentes (Insights da Concorrência) ---
+
+
+@router.get("/concorrentes", response_model=list[ConcorrenteOut])
+def list_concorrentes(db: Session = Depends(get_db)):
+    return db.query(Concorrente).order_by(Concorrente.nome).all()
+
+
+@router.post("/concorrentes", response_model=ConcorrenteOut)
+def create_concorrente(payload: ConcorrenteIn, db: Session = Depends(get_db)):
+    if db.query(Concorrente).filter(Concorrente.pagina == payload.pagina).first():
+        raise HTTPException(status_code=400, detail="Já existe um concorrente com essa página.")
+    conc = Concorrente(**payload.model_dump())
+    db.add(conc)
+    db.commit()
+    db.refresh(conc)
+    return conc
+
+
+@router.put("/concorrentes/{concorrente_id}", response_model=ConcorrenteOut)
+def update_concorrente(concorrente_id: int, payload: ConcorrenteIn, db: Session = Depends(get_db)):
+    conc = db.query(Concorrente).filter(Concorrente.id == concorrente_id).first()
+    if not conc:
+        raise HTTPException(status_code=404, detail="Concorrente não encontrado.")
+    for campo, valor in payload.model_dump().items():
+        setattr(conc, campo, valor)
+    db.commit()
+    db.refresh(conc)
+    return conc
+
+
+@router.delete("/concorrentes/{concorrente_id}")
+def delete_concorrente(concorrente_id: int, db: Session = Depends(get_db)):
+    conc = db.query(Concorrente).filter(Concorrente.id == concorrente_id).first()
+    if not conc:
+        raise HTTPException(status_code=404, detail="Concorrente não encontrado.")
+    db.delete(conc)
+    db.commit()
+    return {"ok": True}
+
+
+@router.post("/concorrentes/analisar")
+def analisar_texto(payload: ConcorrenteTextoIn, db: Session = Depends(get_db)):
+    """Prévia: mostra quais anunciantes vieram no texto colado, sem gravar nada."""
+    return concorrentes_svc.analisar(db, payload.texto)
+
+
+@router.post("/concorrentes/importar")
+def importar_texto(payload: ConcorrenteTextoIn, db: Session = Depends(get_db)):
+    return concorrentes_svc.importar(db, payload.texto, payload.paginas)

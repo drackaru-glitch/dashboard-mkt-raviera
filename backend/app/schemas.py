@@ -101,3 +101,34 @@ class UserOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class ConcorrenteIn(BaseModel):
+    nome: str
+    pagina: str  # nome do anunciante exatamente como aparece na Biblioteca de Anúncios
+    cidade: Optional[str] = None
+    marca_chave: Optional[str] = None
+    brand_id: Optional[int] = None
+    ativo: bool = True
+
+
+class ConcorrenteOut(BaseModel):
+    id: int
+    nome: str
+    pagina: str
+    cidade: Optional[str] = None
+    marca_chave: Optional[str] = None
+    brand_id: Optional[int] = None
+    ativo: bool
+
+    class Config:
+        from_attributes = True
+
+
+class ConcorrenteTextoIn(BaseModel):
+    """Texto copiado da página da Biblioteca de Anúncios. `paginas` limita a importação aos
+    anunciantes escolhidos — sem isso, uma busca por palavra-chave traria anunciantes que nada
+    têm a ver com o concorrente."""
+
+    texto: str
+    paginas: Optional[list[str]] = None

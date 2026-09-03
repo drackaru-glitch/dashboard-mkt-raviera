@@ -5,12 +5,18 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.auth import allowed_brand_ids, get_current_user
-from app.config import GOOGLE_ADS_DEMO_MODE, META_DEMO_MODE, NBS_DEMO_MODE
+from app.config import (
+    ANALISTAS_REDES_SOCIAIS,
+    GOOGLE_ADS_DEMO_MODE,
+    META_DEMO_MODE,
+    NBS_DEMO_MODE,
+)
 from app.database import get_db
 from app.models import (
     AdDailyMetric,
     Brand,
     BrandNewsItem,
+    ComentarioSocial,
     DailyMetric,
     FunilDailyMetric,
     GoogleAccountCache,
@@ -20,12 +26,19 @@ from app.models import (
     InstagramStatsCache,
     InstagramTopPostCache,
     SaldoCache,
+    TokenSaude,
     User,
 )
 from app.news_client import MARCAS_CHAVE
+from app import concorrentes as concorrentes_svc
 from app.sync import SyncEmAndamento, sync_all
 
 router = APIRouter(prefix="/api", tags=["dashboard"])
+
+# Com quantos dias de antecedência o painel começa a avisar que um token vai vencer. Trinta
+# dá tempo de agendar a troca sem correria — e é bem mais do que o zero de aviso que a gente
+# tinha antes, quando o jeito de descobrir era o painel zerar.
+AVISO_TOKEN_DIAS = 30
 
 
 def _iso_utc(dt: datetime | None) -> str | None:
@@ -42,6 +55,37 @@ def _scoped_brands(db: Session, user: User):
     if ids is not None:
         query = query.filter(Brand.id.in_(ids)) if ids else query.filter(False)
     return query.all()
+
+
+def _saude_tokens(db: Session) -> dict:
+    """Resumo do prazo dos tokens do Meta, pro painel avisar ANTES de parar de funcionar.
+
+    Só devolve o que precisa de atenção. Token de usuário do sistema não vence, então em
+    condição saudável isto volta vazio e a tela não mostra nada.
+    """
+    agora = datetime.utcnow()
+    itens = []
+    for t in db.query(TokenSaude).all():
+        # O prazo que mata é o de acesso aos dados; `expira_em` quase sempre é nulo.
+        prazo = t.acesso_expira_em or t.expira_em
+        dias = (prazo - agora).days if prazo else None
+        if t.valido and (dias is None or dias > AVISO_TOKEN_DIAS):
+            continue
+        itens.append(
+            {
+                "rotulo": t.rotulo,
+                "tipo": t.tipo,
+                "valido": t.valido,
+                "diasRestantes": dias,
+                "expiraEm": _iso_utc(prazo),
+                "erro": t.erro,
+            }
+        )
+    # Quem vence primeiro (ou já morreu) aparece na frente.
+    itens.sort(key=lambda i: (i["valido"], i["diasRestantes"] if i["diasRestantes"] is not None else 9999))
+    # Tokens diferentes com a mesma data são um só problema (os do Instagram vencem todos
+    # juntos porque saíram do mesmo token de usuário) — a tela mostra o total, não 23 avisos.
+    return {"alertas": itens, "total": len(itens)}
 
 
 def _build_noticias(db: Session, brands: list[Brand]) -> list[dict]:
@@ -191,7 +235,7 @@ def get_dashboard(user: User = Depends(get_current_user), db: Session = Depends(
         "criativosDiarios": criativos_diarios,
         "organico": organico,
         "noticias": noticias,
-        "meta": {"lastSync": last_sync, "demoMode": META_DEMO_MODE},
+        "meta": {"lastSync": last_sync, "demoMode": META_DEMO_MODE, "tokens": _saude_tokens(db)},
     }
 
 
@@ -408,3 +452,131 @@ def trigger_sync(user: User = Depends(get_current_user), db: Session = Depends(g
     except SyncEmAndamento:
         raise HTTPException(status_code=409, detail="Já existe uma sincronização em andamento. Aguarde ela terminar.")
     return {**result, "sincronizadoEm": datetime.utcnow().isoformat()}
+
+
+@router.get("/redes-sociais")
+def dados_redes_sociais(
+    dias: int = 30,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Dados da aba Redes Sociais: o que chegou nas redes das marcas e o que ainda não foi
+    respondido, por marca e por analista.
+
+    Hoje isso é comentário em post do Instagram. Mensagem direta (Direct/Messenger) depende
+    de App Review do Meta que ainda não foi aprovado — `canais` diz o que está ligado, pra
+    tela não fingir que a caixa de entrada inteira está aqui.
+    """
+    dias = max(1, min(dias, 90))
+    brands = _scoped_brands(db, user)
+    brands_by_id = {b.id: b for b in brands}
+    if not brands_by_id:
+        return {"marcas": [], "comentarios": [], "resumo": {}, "canais": {}, "periodoDias": dias}
+
+    corte = datetime.utcnow() - timedelta(days=dias)
+    comentarios = (
+        db.query(ComentarioSocial)
+        .filter(
+            ComentarioSocial.brand_id.in_(list(brands_by_id)),
+            ComentarioSocial.criado_em >= corte,
+        )
+        .order_by(ComentarioSocial.criado_em.desc())
+        .all()
+    )
+
+    agora = datetime.utcnow()
+    itens = []
+    por_marca: dict[int, dict] = {}
+    for c in comentarios:
+        brand = brands_by_id[c.brand_id]
+        espera_h = None
+        if c.respondido and c.respondido_em and c.criado_em:
+            espera_h = max((c.respondido_em - c.criado_em).total_seconds() / 3600, 0)
+        elif not c.respondido and c.criado_em:
+            espera_h = max((agora - c.criado_em).total_seconds() / 3600, 0)
+
+        itens.append(
+            {
+                "id": c.id,
+                "brandId": brand.id,
+                "marca": brand.nome,
+                "analista": brand.analista or "",
+                "canal": c.canal,
+                "autor": c.autor,
+                "texto": c.texto,
+                "permalink": c.permalink,
+                "legendaPost": c.legenda_post,
+                "criadoEm": _iso_utc(c.criado_em),
+                "respondido": bool(c.respondido),
+                "respondidoEm": _iso_utc(c.respondido_em),
+                "horasEspera": round(espera_h, 1) if espera_h is not None else None,
+            }
+        )
+
+        agg = por_marca.setdefault(
+            brand.id,
+            {
+                "brandId": brand.id,
+                "marca": brand.nome,
+                "analista": brand.analista or "",
+                "recebidos": 0,
+                "respondidos": 0,
+                "pendentes": 0,
+                "_somaResposta": 0.0,
+                "ultimoEm": None,
+            },
+        )
+        agg["recebidos"] += 1
+        if c.respondido:
+            agg["respondidos"] += 1
+            if espera_h is not None:
+                agg["_somaResposta"] += espera_h
+        else:
+            agg["pendentes"] += 1
+        iso = _iso_utc(c.criado_em)
+        if iso and (agg["ultimoEm"] is None or iso > agg["ultimoEm"]):
+            agg["ultimoEm"] = iso
+
+    marcas = []
+    for agg in por_marca.values():
+        respondidos = agg.pop("_somaResposta")
+        marcas.append(
+            {
+                **agg,
+                "taxaResposta": round(100 * agg["respondidos"] / agg["recebidos"], 1) if agg["recebidos"] else 0.0,
+                "tempoMedioRespostaH": round(respondidos / agg["respondidos"], 1) if agg["respondidos"] else None,
+            }
+        )
+    # Mais pendência primeiro: a aba existe pra mostrar o que está parado esperando resposta.
+    marcas.sort(key=lambda m: (-m["pendentes"], -m["recebidos"]))
+
+    total = len(itens)
+    respondidos = sum(1 for m in itens if m["respondido"])
+    tempos = [m["horasEspera"] for m in itens if m["respondido"] and m["horasEspera"] is not None]
+
+    return {
+        "marcas": marcas,
+        "comentarios": itens,
+        "resumo": {
+            "recebidos": total,
+            "respondidos": respondidos,
+            "pendentes": total - respondidos,
+            "taxaResposta": round(100 * respondidos / total, 1) if total else 0.0,
+            "tempoMedioRespostaH": round(sum(tempos) / len(tempos), 1) if tempos else None,
+        },
+        "canais": {
+            # Ligado = já traz dado real. Desligado = depende de App Review do Meta.
+            "instagramComentario": not META_DEMO_MODE,
+            "instagramDireto": False,
+            "messenger": False,
+        },
+        "analistasColetados": sorted(ANALISTAS_REDES_SOCIAIS),
+        "periodoDias": dias,
+    }
+
+
+@router.get("/concorrentes")
+def dados_concorrentes(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Dados da aba Insights da Concorrência. Não é filtrado por marca do usuário: o que está
+    aqui é anúncio público de concorrente, não dado de conta nossa."""
+    return concorrentes_svc.montar_visao(db)

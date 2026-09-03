@@ -4,6 +4,93 @@ Registro de versões do projeto. Uma versão nova é criada a cada conjunto de a
 
 ---
 
+## 0.55 — 2026-09-01
+
+### Monitor de tokens do Meta
+- A sincronização agora confere o prazo de todos os tokens do Meta e o painel avisa **30 dias antes** de algum vencer. Antes, o jeito de descobrir que um token morreu era o painel zerar.
+- Custa 2,8s e uma requisição: os 25 tokens vão num lote só do `debug_token`.
+- O aviso só aparece quando há o que avisar. Com tudo em usuário do sistema, some da tela.
+
+### O que o monitor revelou no primeiro uso
+- **Os 23 tokens do Instagram vencem todos no mesmo dia: 22/11/2026.** Não é coincidência — 18 deles foram derivados do token pessoal do Felipe, e token de página herda o prazo de quem o gerou.
+- O comentário no `config.py` dizia que o token pessoal expira em 60 dias e que os de página nunca expiram. Os dois estavam errados: o que vence não é o `expires_at` (vem 0 em todos), é o `data_access_expires_at` — o prazo de 90 dias que o Meta impõe a token de usuário. Token de usuário do sistema não tem esse prazo.
+- Os 5 tokens que já vêm do usuário do sistema (@ravieramotors, @ravieramotorsdourados, @raviera_bmwmotorrad, @ravieramini, @consorciogruporaviera) não vencem nunca. São a prova de que a correção funciona.
+
+### Falso alarme corrigido antes de entrar
+- Na primeira versão o monitor acusou o @acrediesel de token inválido. Era erro meu: o `debug_token` só inspeciona token do mesmo app, e falha de inspeção não é token morto — a conta funcionava normalmente.
+- Agora, quando a inspeção falha, o sistema pergunta direto ao token se ele responde. Só acusa problema se ele de fato não responder.
+
+### Script pra regerar os tokens do Instagram
+- `backend/regerar_tokens_instagram.py` rederiva os tokens de página a partir de um token de usuário, em vez de colar 23 à mão como foi feito da primeira vez.
+- Roda em simulação por padrão; só grava com `--gravar`. Avisa se o token de origem não é de usuário do sistema ou se está sem algum escopo — porque os tokens gerados herdam as duas coisas.
+- Serve também de medidor: hoje ele reporta "5 a atualizar · 18 fora do alcance". Quando as páginas forem atribuídas ao usuário do sistema, esse 18 vira 0.
+
+---
+
+## 0.54 — 2026-09-01
+
+### Nova área: Redes Sociais
+- Aba nova no menu. Mostra os comentários que chegaram nos posts do Instagram de cada marca e, principalmente, **o que ainda não foi respondido** — com o analista responsável ao lado.
+- Quatro indicadores no topo: comentários recebidos, sem resposta, taxa de resposta e tempo médio de resposta.
+- Tabela por marca ordenada por pendência (a marca mais abandonada aparece primeiro). Clicar numa marca filtra a lista.
+- Lista de comentários com o texto, há quanto tempo está esperando e link direto pro post. Vem filtrada em "só sem resposta", que é o uso do dia a dia.
+- A tela fala em **comentário**, não em "mensagem": mensagem é o que vem de Direct e Messenger, e isso ainda não entra aqui.
+- Começa nas 13 marcas do Felipe (`ANALISTAS_REDES_SOCIAIS` em config.py). Coletar as 23 custaria tempo de sincronização sem retorno hoje.
+
+### O primeiro número que a aba deu
+- 219 comentários em 30 dias, **209 sem resposta**: taxa de resposta de 4,6%. Nissan Campo Grande sozinha tem 86 pendentes.
+- Entre os pendentes havia reclamação formal de cliente sobre devolução de dinheiro, parada num post público. Era exatamente esse tipo de coisa que ninguém via.
+
+### Comentário de anúncio (dark post) ficou de fora
+- Chegou a funcionar e foi removido a pedido: só trazia 16 comentários em 30 dias e custava uma chamada a mais por conta de anúncio.
+- Sem ele, a coleta caiu de ~8s para **4s**, e a etapa passou a ser 1 requisição por marca em vez de 2.
+
+### Mensagem direta ainda não entra
+- Instagram Direct e Messenger **não** estão aqui, e a tela diz isso em vez de fingir que é a caixa de entrada inteira.
+- Não é problema de token: o token do sistema já tem o escopo `instagram_manage_messages`, e a Graph API mesmo assim responde `(#3) Application does not have the capability`. É capacidade do app, liberada só por App Review (Advanced Access) do Meta.
+- No Messenger falta ainda o escopo `pages_messaging`, e o token do sistema só enxerga 5 páginas do Facebook.
+- O campo `canal` do modelo já existe pra receber "instagram_direct" e "messenger" sem migração, quando/se a aprovação sair.
+
+### Autor do comentário
+- Aparece "perfil não identificado" na maioria: `username` só volta quando o token tem `instagram_manage_comments`, e os tokens de página guardados hoje foram gerados antes desta aba existir.
+- Medido: 0 de 126 comentários com autor pelo token de página; 18 de 18 pelo token do sistema, que tem o escopo. Regerar os tokens de página com `instagram_manage_comments` resolve — **não** depende de App Review, o app já tem essa permissão concedida.
+- Sem o autor, "respondido" cai pra "existe resposta no fio" em vez de "existe resposta nossa". Em post de loja é quase sempre a loja, mas é aproximação.
+
+### Sem custo relevante de sincronização
+- A coleta soma **4s** a uma sincronização de ~95s, e não faz uma requisição por post: usa requisição **em lote** da Graph API. Medido: 28 posts levavam ~30s um a um e levam 1,8s num lote só.
+- A listagem de posts não custa requisição nenhuma — reaproveita o `/media` que a sincronização do Instagram já fazia (contagem, permalink e legenda já vinham nela). Sobra 1 requisição por marca.
+- Só relê os comentários de um post quando a contagem mudou, ou quando ele ainda tem pendência de até 21 dias — responder um comentário nem sempre mexe na contagem do post, e sem essa segunda regra o item ficaria pendente pra sempre na tela.
+- Comentário coletado é guardado por 90 dias.
+
+---
+
+## 0.53 — 2026-08-27
+
+### Números dos KPIs contam até o valor
+- Investimento, Leads Gerados, CPL Médio e Contas em Alerta de Saldo agora sobem contando, ao abrir a página e ao trocar o período.
+- Na primeira aparição sobe do zero; ao trocar o filtro parte do valor anterior, o que deixa visível se subiu ou desceu em vez de sempre encher de novo.
+- A contagem desacelera no fim (curva cúbica) e termina exatamente no valor real — o número "assenta" no lugar em vez de travar como cronômetro.
+- Respeita a configuração de "reduzir animações" do sistema operacional: nesse caso o valor entra direto.
+- Em aba de segundo plano o valor também entra direto. O navegador não executa animação em aba oculta, e sem essa proteção os cards ficariam mostrando "R$ 0,00" no lugar do investimento real até alguém olhar para a aba.
+
+---
+
+## 0.52 — 2026-08-27
+
+### Nova área: Insights da Concorrência
+- Aba nova no menu, ao lado de Meta Ads, Google Ads e Informações Gerais.
+- Acompanha os criativos que os concorrentes estão rodando na Biblioteca de Anúncios do Meta: por modelo, por **tipo de campanha** (PcD, taxista, produtor rural/CNPJ, consórcio, seminovos, pós-venda, bônus na troca, taxa 0%), com preço "de/por", bônus na troca e destino do clique.
+- Guarda **desde quando cada criativo está no ar** e marca os que saíram. Criativo que sobrevive semanas é criativo que converte pro concorrente — é a informação mais útil daqui, e a única que só existe acumulando coletas.
+- Os públicos com isenção (PcD, taxista, produtor rural) ganham destaque de cor porque são venda de margem garantida: dá pra ver rápido se o concorrente explora um nicho que a gente não.
+
+### Como os dados entram
+- Por **colagem**: alguém abre a Biblioteca de Anúncios (pública, sem login), copia a página e cola na tela de importação. O sistema lê e organiza.
+- Não é raspagem automática de propósito: robô coletando do Facebook viola os termos de uso deles, e o risco recairia sobre o grupo.
+- A API oficial da Biblioteca **não resolve** este caso: fora da União Europeia ela só devolve anúncios políticos e de causas sociais — anúncio de concessionária não existe lá. Por isso a colagem.
+- A importação tem prévia: mostra quais anunciantes vieram no texto e deixa escolher. Busca por palavra-chave na Biblioteca traz gente sem relação (buscando "kampai" apareceram restaurante e floricultura), e sem esse filtro isso entraria como concorrente.
+
+---
+
 ## 0.51 — 2026-08-24
 
 ### Linhas neon nos cards

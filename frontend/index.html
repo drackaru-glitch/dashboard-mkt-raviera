@@ -46,7 +46,7 @@
 
 <script type="text/babel" data-presets="react">
 const { useState, useMemo, useEffect, useRef } = React;
-const APP_VERSION = "0.51";
+const APP_VERSION = "0.55";
 
 /* ================================================================== */
 /* 1) CLIENTE DA API (backend próprio, substitui o Apps Script)         */
@@ -206,6 +206,8 @@ const IconInstagram = (p) => <Icon {...p} path={<><rect x="2" y="2" width="20" h
 const IconHeart = (p) => <Icon {...p} path={<path d="M20.84 4.61a5.5 5.5 0 00-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 00-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 000-7.78z" />} />;
 const IconSparkle = (p) => <Icon {...p} path={<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3z" />} />;
 const IconSend = (p) => <Icon {...p} path={<><line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" /></>} />;
+const IconMessage = (p) => <Icon {...p} path={<path d="M21 11.5a8.38 8.38 0 01-.9 3.8 8.5 8.5 0 01-7.6 4.7 8.38 8.38 0 01-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 01-.9-3.8 8.5 8.5 0 014.7-7.6 8.38 8.38 0 013.8-.9h.5a8.48 8.48 0 018 8v.5z" />} />;
+const IconClock = (p) => <Icon {...p} path={<><circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" /></>} />;
 
 /* ================================================================== */
 /* 4) GRÁFICOS EM SVG NATIVO COM TOOLTIP INTERATIVO                     */
@@ -416,7 +418,44 @@ function Sparkline({ valores, cor, dark }) {
     </svg>
   );
 }
-function KpiCard({ IconComp, label, value, badgeValue, previousValue, previousLabel, dark, accent, gauge, menorMelhor, serie }) {
+// Anima o número contando até o valor final. Na primeira aparição sobe do zero; depois disso
+// (ex.: ao trocar o período) parte do valor anterior, o que deixa claro se subiu ou desceu em
+// vez de sempre "encher" de novo.
+// A desaceleração no fim (curva cúbica) é o que faz parecer que o número "assenta" no lugar —
+// uma contagem linear parece um cronômetro travando.
+// Respeita quem configurou menos animação no sistema operacional: nesse caso o valor entra
+// direto, sem contagem.
+function useContagem(alvo, duracaoMs = 900) {
+  const [valor, setValor] = useState(0);
+  const anterior = useRef(0);
+  useEffect(() => {
+    const de = anterior.current;
+    anterior.current = alvo;
+    if (!isFinite(alvo) || !isFinite(de) || de === alvo) { setValor(alvo); return; }
+    const reduzir = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    // Aba em segundo plano não executa requestAnimationFrame — sem esta guarda o card ficaria
+    // parado no zero, mostrando "R$ 0,00" no lugar do investimento real até alguém olhar pra
+    // aba. Melhor entregar o número certo na hora e abrir mão da animação nesse caso.
+    if (reduzir || document.hidden) { setValor(alvo); return; }
+    let raf, inicio = null;
+    const passo = (agora) => {
+      if (inicio === null) inicio = agora;
+      const p = Math.min((agora - inicio) / duracaoMs, 1);
+      setValor(de + (alvo - de) * (1 - Math.pow(1 - p, 3)));
+      if (p < 1) raf = requestAnimationFrame(passo);
+    };
+    raf = requestAnimationFrame(passo);
+    return () => cancelAnimationFrame(raf);
+  }, [alvo, duracaoMs]);
+  return valor;
+}
+
+function KpiCard({ IconComp, label, value, badgeValue, previousValue, previousLabel, dark, accent, gauge, menorMelhor, serie, valorNum, formatar }) {
+  // `valorNum` + `formatar` ligam a contagem. Sem eles o card mostra `value` direto, do jeito
+  // que sempre foi — os outros painéis (Google, Funil, SAC) seguem funcionando sem alteração.
+  const anima = valorNum !== undefined && valorNum !== null && typeof formatar === "function";
+  const contado = useContagem(anima ? valorNum : 0);
+  const valorExibido = anima ? formatar(contado) : value;
   if (gauge) {
     const temValor = badgeValue !== null && badgeValue !== undefined && isFinite(badgeValue);
     // badgeValue é sempre a variação REAL do número (ex.: CPL subiu 20% → +20%, mostrado
@@ -434,7 +473,7 @@ function KpiCard({ IconComp, label, value, badgeValue, previousValue, previousLa
           <p className={"text-[11px] font-medium uppercase tracking-wide text-right " + (dark ? "text-neutral-500" : "text-neutral-500")}>{label}</p>
         </div>
         <div className="w-full">
-          <p className={"text-2xl font-bold tabular-nums tracking-tight " + (dark ? "text-neutral-50" : "text-neutral-900")}>{value}</p>
+          <p className={"text-2xl font-bold tabular-nums tracking-tight " + (dark ? "text-neutral-50" : "text-neutral-900")}>{valorExibido}</p>
           <div className="flex items-baseline gap-1.5">
             <span className={"text-sm font-bold tabular-nums " + corPct}>
               {temValor ? (badgeValue >= 0 ? "+" : "-") + Math.abs(badgeValue).toFixed(1).replace(".", ",") + "%" : "—"}
@@ -461,7 +500,7 @@ function KpiCard({ IconComp, label, value, badgeValue, previousValue, previousLa
       </div>
       <div>
         <p className={"text-[11px] font-medium uppercase tracking-wide " + (dark ? "text-neutral-500" : "text-neutral-500")}>{label}</p>
-        <p className={"text-xl font-bold tabular-nums tracking-tight " + (dark ? "text-neutral-50" : "text-neutral-900")}>{value}</p>
+        <p className={"text-xl font-bold tabular-nums tracking-tight " + (dark ? "text-neutral-50" : "text-neutral-900")}>{valorExibido}</p>
         {previousValue !== undefined && (
           <div className={"inline-flex items-center gap-1 mt-2 rounded-md px-2 py-1 text-xs font-semibold tabular-nums " + (dark ? "bg-neutral-800 text-neutral-200" : "bg-neutral-100 text-neutral-700")}>
             <span className={dark ? "text-neutral-500" : "text-neutral-400"}>{previousLabel}:</span> {previousValue}
@@ -1579,6 +1618,530 @@ function FunnelDiagram({ agg, dark }) {
   );
 }
 
+// Cor por tipo de campanha do concorrente. Os públicos com isenção (PcD, taxista, produtor
+// rural) ganham cor própria porque são o dado mais acionável da aba: são vendas de margem
+// garantida, e dá pra ver rápido se o concorrente está explorando um nicho que a gente não.
+function corTipo(tipo, dark) {
+  const mapa = {
+    "PcD": dark ? "bg-violet-500/15 text-violet-300" : "bg-violet-100 text-violet-700",
+    "Taxista": dark ? "bg-amber-500/15 text-amber-300" : "bg-amber-100 text-amber-700",
+    "Produtor rural / CNPJ": dark ? "bg-lime-500/15 text-lime-300" : "bg-lime-100 text-lime-700",
+    "Consórcio": dark ? "bg-cyan-500/15 text-cyan-300" : "bg-cyan-100 text-cyan-700",
+    "Pós-venda": dark ? "bg-sky-500/15 text-sky-300" : "bg-sky-100 text-sky-700",
+    "Seminovos": dark ? "bg-teal-500/15 text-teal-300" : "bg-teal-100 text-teal-700",
+    "Bônus na troca": dark ? "bg-rose-500/15 text-rose-300" : "bg-rose-100 text-rose-700",
+    "Taxa 0%": dark ? "bg-indigo-500/15 text-indigo-300" : "bg-indigo-100 text-indigo-700",
+  };
+  return mapa[tipo] || (dark ? "bg-neutral-800 text-neutral-400" : "bg-neutral-100 text-neutral-600");
+}
+
+// Aviso de token perto de vencer. Só aparece quando há o que avisar — em condição saudável
+// (tudo em token de usuário do sistema, que não tem prazo) some da tela.
+// Existe porque token do Meta morre em silêncio: o painel zera e ninguém sabe por quê.
+function AlertaTokens({ tokens, dark }) {
+  if (!tokens || !tokens.alertas || !tokens.alertas.length) return null;
+  const vencidos = tokens.alertas.filter((t) => !t.valido || (t.diasRestantes !== null && t.diasRestantes <= 0));
+  const grave = vencidos.length > 0;
+  const cor = grave
+    ? (dark ? "bg-red-500/5 border-red-500/20 text-red-400" : "bg-red-50 border-red-200 text-red-700")
+    : (dark ? "bg-amber-500/5 border-amber-500/20 text-amber-400" : "bg-amber-50 border-amber-200 text-amber-700");
+  // Vários tokens vencendo no mesmo dia são um problema só (os do Instagram saem todos do
+  // mesmo token de usuário) — resumimos em vez de empilhar 23 avisos iguais.
+  const primeiro = tokens.alertas[0];
+  const outros = tokens.alertas.length - 1;
+  return (
+    <div className={"rounded-lg border px-3 py-2 flex items-start gap-2 text-xs " + cor}>
+      <IconAlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+      <span>
+        <strong>{grave ? "Token vencido" : "Token perto de vencer"}:</strong> {primeiro.rotulo}
+        {primeiro.diasRestantes !== null && primeiro.diasRestantes > 0
+          ? ` vence em ${primeiro.diasRestantes} dia${primeiro.diasRestantes === 1 ? "" : "s"}`
+          : " já não está mais valendo"}
+        {outros > 0 && ` — e mais ${outros} na mesma situação`}. Sem renovar, esses dados param de atualizar.
+      </span>
+    </div>
+  );
+}
+
+/* ================================================================== */
+/* REDES SOCIAIS — o que chegou nas redes e o que ainda não foi respondido */
+/* ================================================================== */
+
+// Quanto tempo um comentário sem resposta pode esperar antes de virar problema. Não é regra
+// do Meta, é escolha nossa: quem comenta num anúncio de carro está com intenção agora, e
+// meio dia parado já é um lead esfriando.
+const HORAS_ATRASO = 12;
+
+function esperaTexto(horas) {
+  if (horas === null || horas === undefined) return "—";
+  if (horas < 1) return Math.max(Math.round(horas * 60), 1) + " min";
+  if (horas < 48) return Math.round(horas) + "h";
+  return Math.round(horas / 24) + " dias";
+}
+
+function RedesSociaisDashboard({ token, dark, cardBg, mutedText, pushToast }) {
+  const [dados, setDados] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [dias, setDias] = useState(30);
+  const [marcaFiltro, setMarcaFiltro] = useState("todas");
+  const [soPendentes, setSoPendentes] = useState(true);
+  const [limite, setLimite] = useState(40);
+
+  async function carregar(d = dias) {
+    setLoading(true);
+    try {
+      setDados(await authJson("/api/redes-sociais?dias=" + d, token));
+    } catch (e) {
+      pushToast(e.message, "error");
+    } finally {
+      setLoading(false);
+    }
+  }
+  useEffect(() => { carregar(); }, []);
+
+  const comentarios = useMemo(() => {
+    if (!dados) return [];
+    return dados.comentarios.filter(
+      (m) => (marcaFiltro === "todas" || m.marca === marcaFiltro) && (!soPendentes || !m.respondido)
+    );
+  }, [dados, marcaFiltro, soPendentes]);
+
+  useEffect(() => { setLimite(40); }, [marcaFiltro, soPendentes]);
+
+  if (loading) return <div className={"text-sm " + mutedText}>Carregando…</div>;
+  if (!dados) return null;
+
+  const r = dados.resumo;
+  const semNada = !dados.comentarios.length;
+
+  return (
+    <>
+      <div className={"neon-top rounded-xl border p-3 flex flex-wrap items-center gap-3 " + (dark ? "is-dark " : "") + cardBg} style={{ "--neon": "#ec4899" }}>
+        <h2 className="text-sm font-bold flex items-center gap-1.5"><IconMessage className="h-4 w-4" /> Redes Sociais</h2>
+        <span className={"text-xs " + mutedText}>
+          {dados.marcas.length} marca{dados.marcas.length === 1 ? "" : "s"} · analista{dados.analistasColetados.length === 1 ? "" : "s"}{" "}
+          {dados.analistasColetados.join(", ") || "todos"}
+        </span>
+        <div className="ml-auto flex items-center gap-2">
+          <select value={dias} onChange={(e) => { const d = Number(e.target.value); setDias(d); carregar(d); }}
+            className={"h-8 rounded-lg border px-2 text-xs font-semibold " + (dark ? "bg-neutral-900 border-neutral-800 text-neutral-200" : "bg-white border-neutral-200 text-neutral-700")}>
+            <option value={7}>Últimos 7 dias</option>
+            <option value={30}>Últimos 30 dias</option>
+            <option value={90}>Últimos 90 dias</option>
+          </select>
+          <button onClick={() => carregar()} className={"h-8 px-3 rounded-lg border text-xs font-semibold flex items-center gap-1.5 " + (dark ? "bg-neutral-900 border-neutral-800 text-neutral-200" : "bg-white border-neutral-200 text-neutral-700")}>
+            <IconRefresh className="h-3.5 w-3.5" /> Atualizar
+          </button>
+        </div>
+      </div>
+
+      {/* A tela não pode dar a impressão de ser a caixa de entrada inteira: Direct e Messenger
+          dependem de uma liberação do Meta que ainda não saiu, então isso fica dito na cara. */}
+      {!dados.canais.instagramDireto && (
+        <div className={"rounded-lg border px-3 py-2 flex items-start gap-2 text-xs " + (dark ? "bg-blue-500/5 border-blue-500/20 text-blue-300" : "bg-blue-50 border-blue-200 text-blue-700")}>
+          <IconAlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+          <span>
+            Aqui estão os <strong>comentários</strong> dos posts do Instagram.
+            Mensagens (Direct e Messenger) ainda não entram: dependem de uma permissão do Meta que exige App Review.
+          </span>
+        </div>
+      )}
+
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <KpiCard IconComp={IconMessage} label="Comentários Recebidos" value={fmtNum(r.recebidos)} dark={dark} accent="#ec4899"
+          valorNum={r.recebidos} formatar={(v) => fmtNum(Math.round(v))} />
+        <KpiCard IconComp={IconAlertTriangle} label="Sem Resposta" value={fmtNum(r.pendentes)} dark={dark} accent="#ef4444"
+          valorNum={r.pendentes} formatar={(v) => fmtNum(Math.round(v))} />
+        <KpiCard IconComp={IconCheck} label="Taxa de Resposta" value={(r.taxaResposta || 0).toFixed(1).replace(".", ",") + "%"} dark={dark} accent="#10b981"
+          valorNum={r.taxaResposta || 0} formatar={(v) => v.toFixed(1).replace(".", ",") + "%"} />
+        <KpiCard IconComp={IconClock} label="Tempo Médio de Resposta" value={esperaTexto(r.tempoMedioRespostaH)} dark={dark} accent="#f59e0b" />
+      </div>
+
+      {semNada ? (
+        <div className={"rounded-xl border p-6 text-center text-sm " + cardBg + " " + mutedText}>
+          Nenhum comentário coletado ainda. Clique em <strong>Atualizar dados</strong> no painel principal — a coleta acontece junto da sincronização.
+        </div>
+      ) : (
+        <>
+          <div className={"neon-top rounded-xl border p-4 " + (dark ? "is-dark " : "") + cardBg} style={{ "--neon": "#ec4899" }}>
+            <h2 className="text-sm font-bold mb-3">Por Marca</h2>
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className={dark ? "text-neutral-500" : "text-neutral-400"}>
+                    <th className="text-left font-medium pb-2">Marca</th>
+                    <th className="text-left font-medium pb-2">Analista</th>
+                    <th className="text-right font-medium pb-2">Recebidos</th>
+                    <th className="text-right font-medium pb-2">Sem resposta</th>
+                    <th className="text-right font-medium pb-2">Taxa</th>
+                    <th className="text-right font-medium pb-2">Tempo médio</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {dados.marcas.map((m) => (
+                    <tr key={m.brandId} onClick={() => setMarcaFiltro(marcaFiltro === m.marca ? "todas" : m.marca)}
+                      className={"border-t cursor-pointer " + (dark ? "border-neutral-800 hover:bg-neutral-800/40" : "border-neutral-100 hover:bg-neutral-50") + (marcaFiltro === m.marca ? (dark ? " bg-neutral-800/60" : " bg-neutral-100") : "")}>
+                      <td className="py-2 font-semibold">{m.marca}</td>
+                      <td className={"py-2 " + mutedText}>{m.analista || "—"}</td>
+                      <td className="py-2 text-right tabular-nums">{fmtNum(m.recebidos)}</td>
+                      <td className={"py-2 text-right tabular-nums font-bold " + (m.pendentes ? (dark ? "text-red-400" : "text-red-600") : mutedText)}>{fmtNum(m.pendentes)}</td>
+                      <td className="py-2 text-right tabular-nums">{m.taxaResposta.toFixed(0)}%</td>
+                      <td className={"py-2 text-right tabular-nums " + mutedText}>{esperaTexto(m.tempoMedioRespostaH)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p className={"text-[11px] mt-2 " + mutedText}>Clique numa marca pra filtrar a lista abaixo.</p>
+          </div>
+
+          <div className={"neon-top rounded-xl border p-4 " + (dark ? "is-dark " : "") + cardBg} style={{ "--neon": "#ec4899" }}>
+            <div className="flex flex-wrap items-center gap-2 mb-3">
+              <h2 className="text-sm font-bold">Comentários</h2>
+              {marcaFiltro !== "todas" && (
+                <button onClick={() => setMarcaFiltro("todas")}
+                  className={"text-[11px] font-semibold rounded-md px-2 py-0.5 flex items-center gap-1 " + (dark ? "bg-neutral-800 text-neutral-300" : "bg-neutral-100 text-neutral-600")}>
+                  {marcaFiltro} <IconX className="h-3 w-3" />
+                </button>
+              )}
+              <label className={"ml-auto flex items-center gap-1.5 text-xs cursor-pointer " + mutedText}>
+                <input type="checkbox" checked={soPendentes} onChange={(e) => setSoPendentes(e.target.checked)} />
+                Só sem resposta
+              </label>
+            </div>
+
+            {!comentarios.length ? (
+              <p className={"text-sm py-4 text-center " + mutedText}>
+                {soPendentes ? "Nenhum comentário sem resposta. Tudo atendido." : "Nada nesse filtro."}
+              </p>
+            ) : (
+              <div className="flex flex-col gap-2">
+                {comentarios.slice(0, limite).map((m) => {
+                  const atrasada = !m.respondido && m.horasEspera !== null && m.horasEspera >= HORAS_ATRASO;
+                  return (
+                    <div key={m.id} className={"rounded-lg border p-2.5 " + (dark ? "border-neutral-800 bg-neutral-900/40" : "border-neutral-200 bg-neutral-50/60")}>
+                      <div className="flex flex-wrap items-center gap-1.5 text-[11px] mb-1">
+                        <span className={"font-semibold rounded px-1.5 py-0.5 " + (dark ? "bg-neutral-800 text-neutral-300" : "bg-neutral-200 text-neutral-700")}>{m.marca}</span>
+                        <span className={mutedText}>{m.autor ? "@" + m.autor : "perfil não identificado"}</span>
+                        <span className={"ml-auto font-semibold " + (m.respondido ? (dark ? "text-emerald-400" : "text-emerald-600") : atrasada ? (dark ? "text-red-400" : "text-red-600") : mutedText)}>
+                          {m.respondido ? "respondido em " + esperaTexto(m.horasEspera) : "esperando há " + esperaTexto(m.horasEspera)}
+                        </span>
+                      </div>
+                      <p className={"text-xs " + (dark ? "text-neutral-200" : "text-neutral-800")}>{m.texto || <em className={mutedText}>(sem texto)</em>}</p>
+                      {m.permalink && (
+                        <a href={m.permalink} target="_blank" rel="noopener noreferrer"
+                          className={"text-[11px] font-semibold mt-1 inline-block " + (dark ? "text-blue-400" : "text-blue-600")}>
+                          Abrir no Instagram →
+                        </a>
+                      )}
+                    </div>
+                  );
+                })}
+                {comentarios.length > limite && (
+                  <button onClick={() => setLimite((v) => v + 40)}
+                    className={"text-xs font-semibold py-2 rounded-lg border " + (dark ? "border-neutral-800 text-neutral-300 hover:bg-neutral-800/50" : "border-neutral-200 text-neutral-600 hover:bg-neutral-50")}>
+                    Ver mais ({comentarios.length - limite} restantes)
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        </>
+      )}
+
+      <footer className={"text-center text-[11px] py-2 " + mutedText}>FEFO · Redes Sociais · v{APP_VERSION}</footer>
+    </>
+  );
+}
+
+function ConcorrenciaDashboard({ token, dark, cardBg, mutedText, pushToast, role }) {
+  const [dados, setDados] = useState({ concorrentes: [] });
+  const [loading, setLoading] = useState(true);
+  const [importOpen, setImportOpen] = useState(false);
+  const [texto, setTexto] = useState("");
+  const [previa, setPrevia] = useState(null);
+  const [selecionadas, setSelecionadas] = useState([]);
+  const [ocupado, setOcupado] = useState(false);
+  const [expandido, setExpandido] = useState({});
+
+  async function carregar() {
+    setLoading(true);
+    try {
+      setDados(await authJson("/api/concorrentes", token));
+    } catch (e) {
+      pushToast(e.message, "error");
+    } finally {
+      setLoading(false);
+    }
+  }
+  useEffect(() => { carregar(); }, []);
+
+  async function analisar() {
+    if (!texto.trim()) { pushToast("Cole o texto da Biblioteca de Anúncios primeiro.", "error"); return; }
+    setOcupado(true);
+    try {
+      const r = await authJson("/admin/concorrentes/analisar", token, { method: "POST", body: JSON.stringify({ texto }) });
+      setPrevia(r);
+      // já vem marcado quem é concorrente conhecido; anunciante novo entra desmarcado de
+      // propósito, porque busca por palavra-chave traz gente que nada tem a ver.
+      setSelecionadas(r.paginas.filter((p) => p.jaCadastrado).map((p) => p.pagina));
+      if (!r.totalAnuncios) pushToast("Não encontrei anúncios nesse texto. Copiou a página inteira?", "error");
+    } catch (e) {
+      pushToast(e.message, "error");
+    } finally { setOcupado(false); }
+  }
+
+  async function importar() {
+    if (!selecionadas.length) { pushToast("Escolha ao menos um anunciante.", "error"); return; }
+    setOcupado(true);
+    try {
+      const r = await authJson("/admin/concorrentes/importar", token, {
+        method: "POST", body: JSON.stringify({ texto, paginas: selecionadas }),
+      });
+      const tot = r.resultado.reduce((a, x) => a + x.encontrados, 0);
+      const nov = r.resultado.reduce((a, x) => a + x.novos, 0);
+      pushToast(`Importado: ${tot} anúncios, ${nov} novo${nov === 1 ? "" : "s"}.`, "success");
+      setImportOpen(false); setTexto(""); setPrevia(null); setSelecionadas([]);
+      carregar();
+    } catch (e) {
+      pushToast(e.message, "error");
+    } finally { setOcupado(false); }
+  }
+
+  const fmtData = (iso) => iso ? iso.split("-").reverse().slice(0, 2).join("/") : "—";
+  const oferta = (a) => {
+    if (a.precoDe && a.precoPor) return fmtBRL(a.precoDe) + " → " + fmtBRL(a.precoPor);
+    if (a.bonus) return "Bônus " + fmtBRL(a.bonus);
+    return "—";
+  };
+
+  if (loading) return <div className={"text-sm " + mutedText}>Carregando…</div>;
+
+  const totalAtivos = dados.concorrentes.reduce((a, c) => a + c.ativos, 0);
+  const semDados = !dados.concorrentes.length;
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className={"neon-top rounded-xl border p-3 flex flex-wrap items-center gap-3 " + (dark ? "is-dark " : "") + cardBg} style={{ "--neon": "#f97316" }}>
+        <div className="flex items-center gap-1.5">
+          <IconTarget className="h-4 w-4 text-orange-500" />
+          <span className="text-sm font-bold">Insights da Concorrência</span>
+        </div>
+        <span className={"text-xs " + mutedText}>
+          {dados.concorrentes.length} concorrente{dados.concorrentes.length === 1 ? "" : "s"} · {totalAtivos} anúncio{totalAtivos === 1 ? "" : "s"} ativo{totalAtivos === 1 ? "" : "s"}
+        </span>
+        <div className="ml-auto flex items-center gap-2">
+          <button onClick={carregar} className={"px-3 py-1.5 rounded-md text-xs font-semibold border " + (dark ? "bg-neutral-800 border-neutral-700 text-neutral-200" : "bg-neutral-100 border-neutral-200 text-neutral-700")}>
+            Atualizar
+          </button>
+          {role === "admin" && (
+            <button onClick={() => setImportOpen(true)} className="px-3 py-1.5 rounded-md text-xs font-semibold bg-blue-600 text-white">
+              Importar coleta
+            </button>
+          )}
+        </div>
+      </div>
+
+      {semDados && (
+        <div className={"rounded-xl border p-6 text-center " + cardBg}>
+          <p className="text-sm font-semibold mb-1">Nenhuma coleta ainda</p>
+          <p className={"text-xs mb-1 " + mutedText}>
+            Abra a Biblioteca de Anúncios do Meta, busque o concorrente, selecione a página inteira (Ctrl+A),
+            copie (Ctrl+C) e clique em “Importar coleta”.
+          </p>
+          <p className={"text-xs " + mutedText}>
+            O histórico começa do zero: em algumas semanas dá pra ver quais criativos o concorrente mantém no ar.
+          </p>
+        </div>
+      )}
+
+      {dados.concorrentes.map((c) => {
+        const modelos = Object.keys(c.grade).sort();
+        const aberto = expandido[c.id];
+        return (
+          <div key={c.id} className={"neon-top rounded-xl border p-4 " + (dark ? "is-dark " : "") + cardBg} style={{ "--neon": "#f97316" }}>
+            <div className="flex flex-wrap items-start justify-between gap-2 mb-3">
+              <div>
+                <h2 className="text-sm font-bold">{c.nome}</h2>
+                <p className={"text-xs " + mutedText}>
+                  {[c.cidade, c.marcaChave].filter(Boolean).join(" · ") || c.pagina}
+                  {c.marcaRival && <span> · concorre com <b>{c.marcaRival}</b></span>}
+                </p>
+              </div>
+              <div className="text-right">
+                <p className="text-xl font-bold tabular-nums">{c.ativos}</p>
+                <p className={"text-[10px] uppercase tracking-wide " + mutedText}>anúncios ativos</p>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap gap-2 mb-3">
+              <span className={"text-[11px] px-2 py-1 rounded-md " + (dark ? "bg-neutral-800 text-neutral-300" : "bg-neutral-100 text-neutral-600")}>
+                Última coleta: <b>{fmtData(c.ultimaColeta)}</b>
+              </span>
+              {c.novosUltimaColeta > 0 && (
+                <span className="text-[11px] px-2 py-1 rounded-md bg-emerald-500/10 text-emerald-600 font-semibold">
+                  +{c.novosUltimaColeta} novo{c.novosUltimaColeta === 1 ? "" : "s"}
+                </span>
+              )}
+              {c.encerradosUltimaColeta > 0 && (
+                <span className="text-[11px] px-2 py-1 rounded-md bg-red-500/10 text-red-600 font-semibold">
+                  −{c.encerradosUltimaColeta} encerrado{c.encerradosUltimaColeta === 1 ? "" : "s"}
+                </span>
+              )}
+            </div>
+
+            {modelos.length > 0 && (
+              <div className="overflow-x-auto mb-3">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className={"text-left text-[10px] uppercase tracking-wide " + mutedText}>
+                      <th className="pb-2 pr-3">Modelo</th>
+                      <th className="pb-2">Tipos de campanha</th>
+                      <th className="pb-2 text-right">Anúncios</th>
+                    </tr>
+                  </thead>
+                  <tbody className={"divide-y " + (dark ? "divide-neutral-800" : "divide-neutral-100")}>
+                    {modelos.map((m) => {
+                      const tipos = c.grade[m];
+                      const total = Object.values(tipos).reduce((a, b) => a + b, 0);
+                      return (
+                        <tr key={m}>
+                          <td className="py-2 pr-3 font-semibold">{m}</td>
+                          <td className="py-2">
+                            <div className="flex flex-wrap gap-1">
+                              {Object.entries(tipos).sort().map(([t, n]) => (
+                                <span key={t} className={"text-[10px] px-1.5 py-0.5 rounded " + corTipo(t, dark)}>
+                                  {t}{n > 1 ? " ×" + n : ""}
+                                </span>
+                              ))}
+                            </div>
+                          </td>
+                          <td className="py-2 text-right tabular-nums font-semibold">{total}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            <button onClick={() => setExpandido((v) => ({ ...v, [c.id]: !v[c.id] }))}
+              className={"w-full flex items-center justify-center gap-1.5 py-2 rounded-md text-xs font-semibold border " +
+                (dark ? "bg-neutral-800 border-neutral-700 text-neutral-200" : "bg-neutral-100 border-neutral-200 text-neutral-700")}>
+              {aberto ? "Ocultar criativos" : "Ver os " + c.ativos + " criativos"}
+              <IconChevronDown className={"h-3.5 w-3.5 transition-transform" + (aberto ? " rotate-180" : "")} />
+            </button>
+
+            {aberto && (
+              <div className="overflow-x-auto mt-3">
+                <table className="w-full text-sm min-w-[720px]">
+                  <thead>
+                    <tr className={"text-left text-[10px] uppercase tracking-wide " + mutedText}>
+                      <th className="pb-2">Início</th>
+                      <th className="pb-2">Dias no ar</th>
+                      <th className="pb-2">Modelo</th>
+                      <th className="pb-2">Campanha</th>
+                      <th className="pb-2">Oferta</th>
+                      <th className="pb-2">Destino</th>
+                    </tr>
+                  </thead>
+                  <tbody className={"divide-y " + (dark ? "divide-neutral-800" : "divide-neutral-100")}>
+                    {c.anuncios.map((a) => (
+                      <tr key={a.id} title={a.texto}>
+                        <td className="py-2 tabular-nums">{fmtData(a.inicio)}</td>
+                        <td className="py-2 tabular-nums">
+                          {a.diasNoAr !== null ? (
+                            <span className={a.diasNoAr >= 30 ? "font-bold text-emerald-600" : ""}>{a.diasNoAr}d</span>
+                          ) : "—"}
+                        </td>
+                        <td className="py-2 font-semibold">{a.modelo || "—"}</td>
+                        <td className="py-2">
+                          <span className={"text-[10px] px-1.5 py-0.5 rounded " + corTipo(a.tipoCampanha || "Geral", dark)}>
+                            {a.tipoCampanha || "Geral"}
+                          </span>
+                        </td>
+                        <td className="py-2 tabular-nums">{oferta(a)}</td>
+                        <td className={"py-2 text-[11px] " + mutedText}>{a.cta || a.dominio || "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {c.encerrados.length > 0 && (
+                  <div className="mt-3">
+                    <p className={"text-[10px] uppercase tracking-wide mb-1 " + mutedText}>Saíram do ar recentemente</p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {c.encerrados.map((a) => (
+                        <span key={a.id} className={"text-[10px] px-2 py-1 rounded " + (dark ? "bg-neutral-800 text-neutral-400" : "bg-neutral-100 text-neutral-500")}>
+                          {(a.modelo || "?") + " · " + (a.tipoCampanha || "Geral") + " · até " + fmtData(a.vistoUltimo)}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })}
+
+      {importOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60" onClick={() => !ocupado && setImportOpen(false)}>
+          <div onClick={(e) => e.stopPropagation()}
+            className={"w-full max-w-2xl rounded-xl border p-5 max-h-[90vh] overflow-y-auto " + (dark ? "bg-neutral-900 border-neutral-800" : "bg-white border-neutral-200")}>
+            <h3 className="text-sm font-bold mb-1">Importar coleta da Biblioteca de Anúncios</h3>
+            <ol className={"text-xs mb-3 list-decimal pl-4 space-y-0.5 " + mutedText}>
+              <li>Abra <b>facebook.com/ads/library</b>, país Brasil, e busque o concorrente pelo nome exato.</li>
+              <li>Role a página até o fim para carregar todos os anúncios.</li>
+              <li>Selecione tudo (Ctrl+A), copie (Ctrl+C) e cole abaixo.</li>
+            </ol>
+            <textarea value={texto} onChange={(e) => { setTexto(e.target.value); setPrevia(null); }}
+              rows={7} placeholder="Cole aqui o conteúdo da página…"
+              className={"w-full rounded-lg border p-2 text-xs font-mono " + (dark ? "bg-neutral-950 border-neutral-700 text-neutral-200" : "bg-white border-neutral-300")} />
+
+            {previa && (
+              <div className="mt-3">
+                <p className="text-xs font-semibold mb-1">
+                  {previa.totalAnuncios} anúncios · escolha de quem importar:
+                </p>
+                <div className={"rounded-lg border divide-y " + (dark ? "border-neutral-800 divide-neutral-800" : "border-neutral-200 divide-neutral-100")}>
+                  {previa.paginas.map((p) => (
+                    <label key={p.pagina} className="flex items-center gap-2 px-3 py-2 text-xs cursor-pointer">
+                      <input type="checkbox" checked={selecionadas.includes(p.pagina)}
+                        onChange={(e) => setSelecionadas((v) => e.target.checked ? [...v, p.pagina] : v.filter((x) => x !== p.pagina))} />
+                      <span className="font-semibold flex-1">{p.pagina}</span>
+                      {!p.jaCadastrado && <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-600">novo</span>}
+                      <span className={"tabular-nums " + mutedText}>{p.anuncios}</span>
+                    </label>
+                  ))}
+                </div>
+                <p className={"text-[11px] mt-1.5 " + mutedText}>
+                  Anunciantes novos vêm desmarcados: a busca por palavra-chave costuma trazer empresas sem relação com o concorrente.
+                </p>
+              </div>
+            )}
+
+            <div className="flex justify-end gap-2 mt-4">
+              <button onClick={() => setImportOpen(false)} disabled={ocupado}
+                className={"px-3 py-1.5 rounded-md text-xs font-semibold border " + (dark ? "bg-neutral-800 border-neutral-700 text-neutral-200" : "bg-neutral-100 border-neutral-200 text-neutral-700")}>
+                Cancelar
+              </button>
+              {!previa ? (
+                <button onClick={analisar} disabled={ocupado} className="px-3 py-1.5 rounded-md text-xs font-semibold bg-blue-600 text-white disabled:opacity-50">
+                  {ocupado ? "Lendo…" : "Analisar"}
+                </button>
+              ) : (
+                <button onClick={importar} disabled={ocupado || !selecionadas.length} className="px-3 py-1.5 rounded-md text-xs font-semibold bg-emerald-600 text-white disabled:opacity-50">
+                  {ocupado ? "Importando…" : "Importar " + selecionadas.length + " anunciante" + (selecionadas.length === 1 ? "" : "s")}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function FunilVendasDashboard({ token, dark, cardBg, mutedText, pushToast, permissoes }) {
   const [marcaFiltro, setMarcaFiltro] = useState("todas");
   const [periodo, setPeriodo] = useState("mesAtual");
@@ -1956,7 +2519,12 @@ const FAQ_BASE = [
   {
     id: "sac_estatisticas",
     gatilhos: ["estatisticas sac", "sac", "mensagens instagram", "mensagens facebook", "tempo de resposta"],
-    resposta: 'O quadro "Estatísticas de Respostas SAC", na aba Informações Gerais, mostra mensagens recebidas/respondidas e tempo médio de resposta no Instagram e Facebook. Ainda é modo demonstração — ler mensagens de verdade exige uma permissão nova do Meta que ainda não foi aprovada.',
+    resposta: 'O quadro "Estatísticas de Respostas SAC", na aba Informações Gerais, ainda é modo demonstração. O dado real está na aba "Redes Sociais": comentários de verdade do Instagram, com quem já foi respondido e quem está esperando.',
+  },
+  {
+    id: "redes_sociais",
+    gatilhos: ["redes sociais", "comentarios", "sem resposta", "pendentes", "direct", "instagram direto"],
+    resposta: 'A aba "Redes Sociais" mostra os comentários que chegaram nos posts do Instagram de cada marca e quais ainda não foram respondidos, com o analista responsável. Clique numa marca da tabela pra filtrar a lista. Mensagem (Direct e Messenger) ainda não entra: depende de uma permissão do Meta que exige App Review.',
   },
 ];
 
@@ -2076,7 +2644,7 @@ function RavieraDashboard({ token, role, email, nome, permissoes, justLoggedIn, 
   }, [justLoggedIn]);
   const [dark, setDark] = useState(() => localStorage.getItem("raviera_theme") !== "light");
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [view, setView] = useState("dashboard"); // "dashboard" (Meta) | "google" | "funil" | "config"
+  const [view, setView] = useState("dashboard"); // "dashboard" (Meta) | "google" | "funil" | "redes" | "concorrencia" | "config"
   const [dashboardMenuOpen, setDashboardMenuOpen] = useState(false);
   const [marcaFiltro, setMarcaFiltro] = useState("todas");
   const [periodo, setPeriodo] = useState("mesAtual");
@@ -2299,7 +2867,7 @@ function RavieraDashboard({ token, role, email, nome, permissoes, justLoggedIn, 
               <button onClick={() => setDashboardMenuOpen((v) => !v)}
                 className={"flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-semibold " +
                   (view !== "config" ? "bg-blue-600 text-white border-blue-600" : (dark ? "bg-neutral-900 border-neutral-800 text-neutral-200" : "bg-white border-neutral-200 text-neutral-700"))}>
-                {view === "google" ? "Google Ads" : view === "funil" ? "Informações Gerais" : "Meta Ads"}
+                {view === "google" ? "Google Ads" : view === "funil" ? "Informações Gerais" : view === "redes" ? "Redes Sociais" : view === "concorrencia" ? "Insights da Concorrência" : "Meta Ads"}
                 <IconChevronDown className={"h-3.5 w-3.5 transition-transform" + (dashboardMenuOpen ? " rotate-180" : "")} />
               </button>
               {dashboardMenuOpen && (
@@ -2320,6 +2888,14 @@ function RavieraDashboard({ token, role, email, nome, permissoes, justLoggedIn, 
                         Informações Gerais
                       </button>
                     )}
+                    <button onClick={() => { setView("redes"); setDashboardMenuOpen(false); }}
+                      className={"w-full text-left px-3 py-2 text-xs font-semibold " + (view === "redes" ? "bg-blue-600 text-white" : (dark ? "text-neutral-200 hover:bg-neutral-800" : "text-neutral-700 hover:bg-neutral-100"))}>
+                      Redes Sociais
+                    </button>
+                    <button onClick={() => { setView("concorrencia"); setDashboardMenuOpen(false); }}
+                      className={"w-full text-left px-3 py-2 text-xs font-semibold " + (view === "concorrencia" ? "bg-blue-600 text-white" : (dark ? "text-neutral-200 hover:bg-neutral-800" : "text-neutral-700 hover:bg-neutral-100"))}>
+                      Insights da Concorrência
+                    </button>
                   </div>
                 </>
               )}
@@ -2340,6 +2916,10 @@ function RavieraDashboard({ token, role, email, nome, permissoes, justLoggedIn, 
           <GoogleAdsDashboard token={token} dark={dark} cardBg={cardBg} mutedText={mutedText} pushToast={pushToast} permissoes={permissoes} />
         ) : view === "funil" && permissoes.verFunil ? (
           <FunilVendasDashboard token={token} dark={dark} cardBg={cardBg} mutedText={mutedText} pushToast={pushToast} permissoes={permissoes} />
+        ) : view === "redes" ? (
+          <RedesSociaisDashboard token={token} dark={dark} cardBg={cardBg} mutedText={mutedText} pushToast={pushToast} />
+        ) : view === "concorrencia" ? (
+          <ConcorrenciaDashboard token={token} dark={dark} cardBg={cardBg} mutedText={mutedText} pushToast={pushToast} role={role} />
         ) : (
           <>
             <div className={"rounded-xl border p-3 flex items-center gap-2.5 " + cardBg}>
@@ -2352,6 +2932,8 @@ function RavieraDashboard({ token, role, email, nome, permissoes, justLoggedIn, 
                 Exibindo dados de demonstração (token do Meta não configurado no servidor).
               </div>
             )}
+
+            <AlertaTokens tokens={dashboardData.meta.tokens} dark={dark} />
 
             {syncing && (
               <div className={"rounded-lg border px-3 py-2 flex items-center gap-2 text-xs " + (dark ? "bg-blue-500/5 border-blue-500/20 text-blue-400" : "bg-blue-50 border-blue-200 text-blue-700")}>
@@ -2413,14 +2995,14 @@ function RavieraDashboard({ token, role, email, nome, permissoes, justLoggedIn, 
 
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
               {permissoes.verInvestimento && (
-                <KpiCard gauge serie={seriesKpi.gasto} IconComp={IconDollar} label="Investimento" value={fmtBRL(currentAgg.gasto)} badgeValue={variacao(currentAgg.gasto, previousAgg.gasto)} previousValue={periodo === "comparativo" ? fmtBRL(previousAgg.gasto) : undefined} previousLabel={previousLabel} dark={dark} accent="#3b82f6" />
+                <KpiCard gauge serie={seriesKpi.gasto} IconComp={IconDollar} label="Investimento" value={fmtBRL(currentAgg.gasto)} valorNum={currentAgg.gasto} formatar={fmtBRL} badgeValue={variacao(currentAgg.gasto, previousAgg.gasto)} previousValue={periodo === "comparativo" ? fmtBRL(previousAgg.gasto) : undefined} previousLabel={previousLabel} dark={dark} accent="#3b82f6" />
               )}
-              <KpiCard gauge serie={seriesKpi.quantidade} IconComp={IconUsers} label="Leads Gerados" value={fmtNum(currentAgg.quantidade)} badgeValue={variacao(currentAgg.quantidade, previousAgg.quantidade)} previousValue={periodo === "comparativo" ? fmtNum(previousAgg.quantidade) : undefined} previousLabel={previousLabel} dark={dark} accent="#6366f1" />
+              <KpiCard gauge serie={seriesKpi.quantidade} IconComp={IconUsers} label="Leads Gerados" value={fmtNum(currentAgg.quantidade)} valorNum={currentAgg.quantidade} formatar={(v) => fmtNum(Math.round(v))} badgeValue={variacao(currentAgg.quantidade, previousAgg.quantidade)} previousValue={periodo === "comparativo" ? fmtNum(previousAgg.quantidade) : undefined} previousLabel={previousLabel} dark={dark} accent="#6366f1" />
               {permissoes.verInvestimento && (
-                <KpiCard gauge serie={seriesKpi.cpl} menorMelhor IconComp={IconTarget} label="CPL Médio" value={fmtBRL(currentAgg.cpl)} badgeValue={variacao(currentAgg.cpl, previousAgg.cpl)} previousValue={periodo === "comparativo" ? fmtBRL(previousAgg.cpl) : undefined} previousLabel={previousLabel} dark={dark} accent="#a855f7" />
+                <KpiCard gauge serie={seriesKpi.cpl} menorMelhor IconComp={IconTarget} label="CPL Médio" value={fmtBRL(currentAgg.cpl)} valorNum={currentAgg.cpl} formatar={fmtBRL} badgeValue={variacao(currentAgg.cpl, previousAgg.cpl)} previousValue={periodo === "comparativo" ? fmtBRL(previousAgg.cpl) : undefined} previousLabel={previousLabel} dark={dark} accent="#a855f7" />
               )}
               {permissoes.verSaldo && (
-                <KpiCard IconComp={IconAlertCircle} label="Contas em Alerta de Saldo" value={fmtNum(contasEmRisco)} dark={dark} accent="#ef4444" />
+                <KpiCard IconComp={IconAlertCircle} label="Contas em Alerta de Saldo" value={fmtNum(contasEmRisco)} valorNum={contasEmRisco} formatar={(v) => fmtNum(Math.round(v))} dark={dark} accent="#ef4444" />
               )}
             </div>
 

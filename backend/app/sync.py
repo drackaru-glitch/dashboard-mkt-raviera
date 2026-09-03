@@ -7,17 +7,30 @@ import random
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
+import httpx
 from sqlalchemy.orm import Session
 
-from app.config import DATABASE_URL, GOOGLE_ADS_DEMO_MODE, META_DEMO_MODE, NBS_DEMO_MODE
+from app.config import (
+    ANALISTAS_REDES_SOCIAIS,
+    DATABASE_URL,
+    GOOGLE_ADS_DEMO_MODE,
+    META_ACCESS_TOKEN,
+    META_ACCESS_TOKEN_PESSOAL,
+    META_API_VERSION,
+    META_DEMO_MODE,
+    NBS_DEMO_MODE,
+    REDES_SOCIAIS_DIAS_RECONFERIR,
+    REDES_SOCIAIS_DIAS_RETENCAO,
+)
 from app.database import SessionLocal
 from app.models import (
     AdAccount,
     AdDailyMetric,
     Brand,
     BrandNewsItem,
+    ComentarioSocial,
     DailyMetric,
     FunilDailyMetric,
     GoogleAccountCache,
@@ -29,7 +42,9 @@ from app.models import (
     InstagramAccount,
     InstagramStatsCache,
     InstagramTopPostCache,
+    MediaComentarioCache,
     SaldoCache,
+    TokenSaude,
 )
 
 if not META_DEMO_MODE:
@@ -38,7 +53,7 @@ if not META_DEMO_MODE:
 if not GOOGLE_ADS_DEMO_MODE:
     from app import google_ads_client
 
-from app import geocoding, instagram_client, media_cache, news_client
+from app import geocoding, instagram_client, media_cache, news_client, social_client
 
 _sync_lock = threading.Lock()
 _sync_started_at: float | None = None
@@ -250,7 +265,13 @@ def _sync_all(db: Session, days: int = 30) -> dict:
         account = accounts_by_id[account_id]
         try:
             synced_days += _sync_meta_account(
-                db, account, account_brands, days, since_criativos, until_criativos, dados_por_conta.get(account_id)
+                db,
+                account,
+                account_brands,
+                days,
+                since_criativos,
+                until_criativos,
+                dados_por_conta.get(account_id),
             )
             db.commit()
             synced_accounts += 1
@@ -260,13 +281,22 @@ def _sync_all(db: Session, days: int = 30) -> dict:
             print(f"[sync] falha ao gravar conta Meta '{account.nome}' ({account.meta_account_id}): {exc}")
 
     try:
-        contas_instagram = _sync_instagram(db, days)
+        contas_instagram, dados_instagram = _sync_instagram(db, days)
         db.commit()
     except Exception as exc:
         db.rollback()
         falhas.append(f"Instagram: {exc}")
         print(f"[sync] falha ao sincronizar Instagram: {exc}")
-        contas_instagram = 0
+        contas_instagram, dados_instagram = 0, {}
+
+    try:
+        comentarios_novos = _sync_social(db, dados_instagram)
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        falhas.append(f"Redes sociais: {exc}")
+        print(f"[sync] falha ao sincronizar redes sociais: {exc}")
+        comentarios_novos = 0
 
     try:
         contas_google = _sync_google_ads(db, days)
@@ -287,6 +317,14 @@ def _sync_all(db: Session, days: int = 30) -> dict:
         marcas_funil = 0
 
     try:
+        tokens_conferidos = _sync_tokens(db)
+    except Exception as exc:
+        db.rollback()
+        falhas.append(f"Tokens: {exc}")
+        print(f"[sync] falha ao conferir tokens: {exc}")
+        tokens_conferidos = 0
+
+    try:
         noticias = _sync_news(db)
         db.commit()
     except Exception as exc:
@@ -299,6 +337,8 @@ def _sync_all(db: Session, days: int = 30) -> dict:
         "contas_sincronizadas": synced_accounts,
         "registros_diarios": synced_days,
         "contas_instagram_sincronizadas": contas_instagram,
+        "comentarios_novos": comentarios_novos,
+        "tokens_conferidos": tokens_conferidos,
         "contas_google_sincronizadas": contas_google,
         "marcas_funil_sincronizadas": marcas_funil,
         "noticias_coletadas": noticias,
@@ -490,7 +530,10 @@ def _sync_funil(db: Session, days: int) -> int:
 
 def _buscar_instagram_account(instagram_business_id: str, access_token: str, days: int) -> dict:
     """Só chamadas de rede, sem tocar no banco — por isso roda em paralelo (mesma ideia do Meta)."""
-    top_post = instagram_client.get_top_post(instagram_business_id, access_token)
+    # A listagem de posts é buscada uma vez e usada duas: aqui, pro melhor post do período, e
+    # depois em _sync_social, pros comentários — que assim não custam requisição nenhuma.
+    posts = instagram_client.get_media(instagram_business_id, access_token)
+    top_post = instagram_client.get_top_post(instagram_business_id, access_token, posts=posts)
     if top_post:
         # mesmo motivo dos criativos: a URL do Meta expira, guardamos a imagem localmente.
         top_post["thumbnail_url"] = media_cache.baixar_imagem(top_post["thumbnail_url"], "instagram", top_post["post_id"])
@@ -498,10 +541,13 @@ def _buscar_instagram_account(instagram_business_id: str, access_token: str, day
         "seguidores_atual": instagram_client.get_followers_count(instagram_business_id, access_token),
         "seguidores_ganhos": instagram_client.get_follower_gain(instagram_business_id, access_token, days=days),
         "top_post": top_post,
+        "posts": posts,
     }
 
 
-def _sync_instagram(db: Session, days: int) -> int:
+def _sync_instagram(db: Session, days: int) -> tuple[int, dict[int, dict]]:
+    """Devolve quantas contas sincronizaram e o que foi buscado — a listagem de posts vai
+    junto porque _sync_social a reaproveita em vez de buscar de novo."""
     accounts = db.query(InstagramAccount).all()
     synced = 0
 
@@ -532,7 +578,7 @@ def _sync_instagram(db: Session, days: int) -> int:
         except Exception as exc:
             db.rollback()
             print(f"[sync] falha ao gravar conta Instagram '{account.nome}' ({account.instagram_business_id}): {exc}")
-    return synced
+    return synced, dados_por_conta
 
 
 def _sync_instagram_account(db: Session, account: InstagramAccount, days: int, dados: dict | None = None) -> None:
@@ -580,6 +626,259 @@ def _sync_instagram_account(db: Session, account: InstagramAccount, days: int, d
         post_cache.comentarios = top_post["comentarios"]
         post_cache.publicado_em = top_post["publicado_em"]
         post_cache.atualizado_em = datetime.utcnow()
+
+
+def _ts(valor: str | None) -> datetime | None:
+    if not valor:
+        return None
+    try:
+        # A Graph API devolve com fuso (ex.: 2026-08-30T14:02:11+0000); o banco guarda tudo
+        # em UTC sem fuso, igual ao resto do sistema.
+        dt = datetime.fromisoformat(valor)
+        return dt.astimezone(timezone.utc).replace(tzinfo=None) if dt.tzinfo else dt
+    except ValueError:
+        return None
+
+
+def _buscar_social_marca(
+    token: str,
+    username: str,
+    posts: list[dict],
+    contagens_conhecidas: dict[str, int],
+    midias_pendentes: set[str],
+) -> list[dict]:
+    """Comentários de uma marca. Só rede, sem tocar no banco (roda em paralelo, como o resto).
+
+    É no máximo UMA requisição HTTP por marca: a listagem de posts já veio da sincronização do
+    Instagram (com contagem, permalink e legenda), então só os comentários em si precisam ser
+    buscados — e vão todos num lote só. Post cujo número de comentários não mudou desde a
+    última coleta nem entra no lote.
+    """
+    info: dict[str, dict] = {
+        p["id"]: {
+            "comentarios_count": int(p.get("comments_count", 0) or 0),
+            "permalink": p.get("permalink"),
+            "legenda": (p.get("caption") or "").strip(),
+        }
+        for p in posts
+        if p.get("id")
+    }
+
+    # Relemos uma mídia quando ela ganhou comentário novo OU quando ainda tem comentário nosso
+    # sem resposta. A segunda condição não é luxo: responder um comentário nem sempre mexe no
+    # comments_count do post, então sem ela um comentário atendido ficaria pendente pra sempre
+    # na tela — que é justamente a informação que a aba existe pra dar.
+    candidatas = [
+        mid
+        for mid, d in info.items()
+        if d["comentarios_count"] > 0
+        and (contagens_conhecidas.get(mid) != d["comentarios_count"] or mid in midias_pendentes)
+    ]
+
+    coletados: list[dict] = []
+    for mid, comentarios in social_client.buscar_comentarios(token, candidatas, username).items():
+        for c in comentarios:
+            coletados.append({**c, "media_id": mid, **{k: info[mid][k] for k in ("permalink", "legenda")}})
+
+    # A contagem só é dada como "vista" pras mídias que a gente realmente releu agora.
+    contagens_novas = {mid: info[mid]["comentarios_count"] for mid in candidatas}
+    return [{"comentarios": coletados, "contagens": contagens_novas}]
+
+
+def _sync_social(db: Session, dados_instagram: dict[int, dict]) -> int:
+    """Coleta os comentários das marcas em ANALISTAS_REDES_SOCIAIS.
+
+    `dados_instagram` é a colheita que _sync_instagram já fez (a listagem /media de cada
+    conta) — reaproveitá-la é o que faz esta etapa quase não custar requisição nenhuma.
+    """
+    if META_DEMO_MODE:
+        return 0
+
+    marcas = [
+        b
+        for b in db.query(Brand).filter(Brand.instagram_account_id.isnot(None)).all()
+        if not ANALISTAS_REDES_SOCIAIS or (b.analista or "") in ANALISTAS_REDES_SOCIAIS
+    ]
+    if not marcas:
+        return 0
+
+    contas = {a.id: a for a in db.query(InstagramAccount).all()}
+    cache = {c.media_id: c.comentarios_count for c in db.query(MediaComentarioCache).all()}
+    limite_reconferir = datetime.utcnow() - timedelta(days=REDES_SOCIAIS_DIAS_RECONFERIR)
+    pendentes_por_marca: dict[int, set[str]] = {}
+    for brand_id, media_id in (
+        db.query(ComentarioSocial.brand_id, ComentarioSocial.media_id)
+        .filter(
+            ComentarioSocial.respondido.is_(False),
+            ComentarioSocial.media_id.isnot(None),
+            ComentarioSocial.criado_em >= limite_reconferir,
+        )
+        .distinct()
+        .all()
+    ):
+        pendentes_por_marca.setdefault(brand_id, set()).add(media_id)
+
+    # Fase 1: buscar, várias marcas ao mesmo tempo.
+    resultado_por_marca: dict[int, dict] = {}
+    with ThreadPoolExecutor(max_workers=MAX_FETCH_WORKERS) as executor:
+        futures = {}
+        for brand in marcas:
+            conta = contas.get(brand.instagram_account_id)
+            if not conta or not conta.access_token:
+                continue
+            posts = (dados_instagram.get(conta.id) or {}).get("posts") or []
+            futures[
+                executor.submit(
+                    _buscar_social_marca,
+                    conta.access_token,
+                    conta.username,
+                    posts,
+                    cache,
+                    pendentes_por_marca.get(brand.id, set()),
+                )
+            ] = brand
+        for fut in as_completed(futures):
+            brand = futures[fut]
+            try:
+                resultado_por_marca[brand.id] = fut.result()[0]
+            except Exception as exc:
+                print(f"[sync] falha ao coletar comentários de '{brand.nome}': {exc}")
+
+    # Fase 2: gravar, uma de cada vez.
+    novos = 0
+    for brand in marcas:
+        resultado = resultado_por_marca.get(brand.id)
+        if not resultado:
+            continue
+        novos += _gravar_comentarios(db, brand, resultado["comentarios"])
+        for media_id, contagem in resultado["contagens"].items():
+            linha = db.query(MediaComentarioCache).filter(MediaComentarioCache.media_id == media_id).first()
+            if not linha:
+                linha = MediaComentarioCache(media_id=media_id)
+                db.add(linha)
+            linha.comentarios_count = contagem
+            linha.atualizado_em = datetime.utcnow()
+        db.commit()
+
+    _limpar_comentarios_antigos(db)
+    db.commit()
+    return novos
+
+
+def _sync_tokens(db: Session) -> int:
+    """Confere o prazo de validade de todos os tokens do Meta que o sistema usa.
+
+    Uma requisição em lote resolve os 25+ tokens, então cabe em qualquer sincronização. O
+    valor que importa é `data_access_expires_at`: `expires_at` vem 0 em praticamente todos os
+    nossos tokens e dá a falsa impressão de que nenhum vence.
+    """
+    if META_DEMO_MODE:
+        return 0
+
+    # `prova` é um caminho barato da Graph API que só responde se o token estiver vivo. Serve
+    # de desempate: o debug_token só inspeciona token do MESMO app, então ele falha em token
+    # vindo de outro Business Manager — e falha de inspeção não é token morto. Sem esse
+    # desempate o painel acusava o @acrediesel de vencido enquanto ele funcionava normalmente.
+    alvos: list[tuple[str, str, str, str]] = [("sistema", "Token do sistema (Meta Ads)", META_ACCESS_TOKEN, "me")]
+    if META_ACCESS_TOKEN_PESSOAL:
+        alvos.append(("pessoal", "Token pessoal (contas Jeep)", META_ACCESS_TOKEN_PESSOAL, "me"))
+    for conta in db.query(InstagramAccount).all():
+        if conta.access_token:
+            alvos.append(
+                (f"instagram:{conta.id}", f"Instagram @{conta.username}", conta.access_token, conta.instagram_business_id)
+            )
+
+    try:
+        infos = social_client.inspecionar_tokens(META_ACCESS_TOKEN, [t for _, _, t, _ in alvos])
+    except Exception as exc:
+        print(f"[sync] não deu pra conferir os tokens: {exc}")
+        return 0
+
+    def _quando(valor) -> datetime | None:
+        # 0 (ou ausente) quer dizer "sem prazo", não "vence agora" — cuidado com falsy aqui.
+        return datetime.utcfromtimestamp(valor) if valor else None
+
+    for (chave, rotulo, token, prova), info in zip(alvos, infos):
+        linha = db.query(TokenSaude).filter(TokenSaude.chave == chave).first()
+        if not linha:
+            linha = TokenSaude(chave=chave)
+            db.add(linha)
+        linha.rotulo = rotulo
+        linha.atualizado_em = datetime.utcnow()
+
+        if info is not None:
+            linha.tipo = info.get("type")
+            linha.valido = bool(info.get("is_valid"))
+            linha.expira_em = _quando(info.get("expires_at"))
+            linha.acesso_expira_em = _quando(info.get("data_access_expires_at"))
+            linha.erro = (info.get("error") or {}).get("message")
+            continue
+
+        # Não deu pra inspecionar: pergunta direto ao token se ele ainda responde.
+        linha.tipo = "DESCONHECIDO"
+        linha.expira_em = None
+        linha.acesso_expira_em = None
+        try:
+            resp = httpx.get(
+                f"https://graph.facebook.com/{META_API_VERSION}/{prova}",
+                params={"fields": "id", "access_token": token},
+                timeout=15,
+            )
+            linha.valido = resp.is_success
+            linha.erro = None if resp.is_success else resp.json().get("error", {}).get("message", "")[:200]
+        except Exception as exc:
+            linha.valido = False
+            linha.erro = str(exc)[:200]
+    db.commit()
+    return len(alvos)
+
+
+def _gravar_comentarios(db: Session, brand: Brand, comentarios: list[dict]) -> int:
+    """Insere os comentários novos e atualiza os que passaram a ter resposta.
+
+    Comentário já conhecido não é reinserido, mas `respondido` é revisto toda vez — é
+    exatamente a informação que muda depois que alguém atende.
+    """
+    if not comentarios:
+        return 0
+    ids = [c["comentario_id"] for c in comentarios if c.get("comentario_id")]
+    existentes = {
+        c.comentario_id: c
+        for c in db.query(ComentarioSocial).filter(ComentarioSocial.comentario_id.in_(ids)).all()
+    }
+    novos = 0
+    for c in comentarios:
+        cid = c.get("comentario_id")
+        if not cid:
+            continue
+        atual = existentes.get(cid)
+        if atual:
+            if c["respondido"] and not atual.respondido:
+                atual.respondido = True
+                atual.respondido_em = _ts(c.get("respondido_em"))
+            continue
+        db.add(
+            ComentarioSocial(
+                brand_id=brand.id,
+                canal="instagram_comentario",
+                comentario_id=cid,
+                media_id=c.get("media_id"),
+                autor=c.get("autor"),
+                texto=c.get("texto"),
+                permalink=c.get("permalink"),
+                legenda_post=(c.get("legenda") or "")[:300],
+                criado_em=_ts(c.get("timestamp")),
+                respondido=bool(c.get("respondido")),
+                respondido_em=_ts(c.get("respondido_em")),
+            )
+        )
+        novos += 1
+    return novos
+
+
+def _limpar_comentarios_antigos(db: Session) -> None:
+    corte = datetime.utcnow() - timedelta(days=REDES_SOCIAIS_DIAS_RETENCAO)
+    db.query(ComentarioSocial).filter(ComentarioSocial.criado_em < corte).delete(synchronize_session=False)
 
 
 def _upsert_ad_daily_metrics(db: Session, brand_id: int, rows: list[dict], desde: str) -> None:

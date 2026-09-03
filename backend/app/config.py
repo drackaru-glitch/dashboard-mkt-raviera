@@ -30,6 +30,20 @@ CONTAS_TOKEN_PESSOAL = {
 # Tokens do Instagram ficam por conta (app.models.InstagramAccount.access_token), não aqui —
 # cada portfólio/Business Manager tem o seu.
 
+# Quais marcas têm os comentários de rede social coletados, pelo analista responsável
+# (campo Brand.analista). Coletar as 23 marcas custaria tempo de sincronização que hoje não
+# tem retorno: a aba nasceu pro Felipe parar de abrir conta por conta. Conjunto vazio = todas.
+ANALISTAS_REDES_SOCIAIS = {"Felipe"}
+
+# Por quantos dias guardamos comentário coletado. Passado isso vira histórico morto: a aba é
+# de atendimento (o que chegou e não foi respondido), não de arquivo.
+REDES_SOCIAIS_DIAS_RETENCAO = 90
+
+# Por quantos dias um comentário pendente continua sendo reconferido a cada sincronização
+# (pra ver se alguém respondeu). É o que impede o custo da coleta de crescer sem parar junto
+# com o histórico: pendência de mais de três semanas não vira atendimento, vira arquivo.
+REDES_SOCIAIS_DIAS_RECONFERIR = 21
+
 GOOGLE_ADS_CLIENT_ID = os.environ.get("GOOGLE_ADS_CLIENT_ID", "").strip()
 GOOGLE_ADS_CLIENT_SECRET = os.environ.get("GOOGLE_ADS_CLIENT_SECRET", "").strip()
 GOOGLE_ADS_DEVELOPER_TOKEN = os.environ.get("GOOGLE_ADS_DEVELOPER_TOKEN", "").strip()
