@@ -25,8 +25,13 @@ def get_followers_count(instagram_business_id: str, token: str) -> int:
     return int(data.get("followers_count", 0) or 0)
 
 
-def get_follower_gain(instagram_business_id: str, token: str, days: int = 30) -> int:
-    """Soma o ganho líquido diário de seguidores (métrica follower_count) no período."""
+def get_follower_gain_daily(instagram_business_id: str, token: str, days: int = 30) -> list[dict]:
+    """Ganho líquido de seguidores DIA A DIA (métrica follower_count) no período.
+
+    Devolve o valor de cada dia em vez do total somado: só assim o painel consegue recalcular
+    o ganho para o período que o usuário escolher. Somar aqui, como era feito antes,
+    congelava o número numa janela fixa de 30 dias corridos que não batia com mês nenhum.
+    """
     since = (date.today() - timedelta(days=days)).isoformat()
     until = date.today().isoformat()
     data = _get(
@@ -35,7 +40,16 @@ def get_follower_gain(instagram_business_id: str, token: str, days: int = 30) ->
         {"metric": "follower_count", "period": "day", "since": since, "until": until},
     )
     values = (data.get("data") or [{}])[0].get("values", [])
-    return sum(int(v.get("value", 0) or 0) for v in values)
+    linhas = []
+    for v in values:
+        fim = v.get("end_time")
+        if not fim:
+            continue
+        # end_time é o instante do fechamento da janela do dia; a métrica se refere ao dia
+        # anterior a esse fechamento.
+        dia = datetime.fromisoformat(fim.replace("Z", "+00:00")).date() - timedelta(days=1)
+        linhas.append({"data": dia, "ganho": int(v.get("value", 0) or 0)})
+    return linhas
 
 
 def get_media(instagram_business_id: str, token: str, limit: int = 50) -> list[dict]:
@@ -54,19 +68,7 @@ def get_media(instagram_business_id: str, token: str, limit: int = 50) -> list[d
     return data.get("data", [])
 
 
-def get_top_post(instagram_business_id: str, token: str, limit: int = 50, posts: list[dict] | None = None) -> dict | None:
-    if posts is None:
-        posts = get_media(instagram_business_id, token, limit)
-    if not posts:
-        return None
-    best = max(posts, key=lambda p: p.get("like_count", 0) or 0)
-    timestamp = best.get("timestamp")
-    return {
-        "post_id": best.get("id"),
-        "legenda": (best.get("caption") or "").strip(),
-        "thumbnail_url": best.get("thumbnail_url") or best.get("media_url"),
-        "permalink": best.get("permalink"),
-        "curtidas": int(best.get("like_count", 0) or 0),
-        "comentarios": int(best.get("comments_count", 0) or 0),
-        "publicado_em": datetime.fromisoformat(timestamp) if timestamp else None,
-    }
+# Havia aqui um get_top_post() que escolhia o post de mais curtidas entre os últimos 50, sem
+# olhar data — era a origem do card de conteúdo orgânico mostrar, em setembro, publicação de
+# maio. Escolher o melhor post é decisão de período, e período é da tela: agora guardamos
+# todas as publicações datadas (InstagramPostMetric) e o recorte acontece no painel.

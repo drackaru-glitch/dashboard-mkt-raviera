@@ -128,23 +128,38 @@ class SaldoCache(Base):
 
 
 class InstagramStatsCache(Base):
+    """Retrato do momento da conta. O ganho de seguidores NÃO mora mais aqui: virou
+    InstagramFollowerDaily, porque um total só não conseguia responder a troca de período."""
+
     __tablename__ = "instagram_stats_cache"
 
     id = Column(Integer, primary_key=True)
     instagram_account_id = Column(Integer, ForeignKey("instagram_accounts.id"), unique=True, nullable=False)
     seguidores_atual = Column(Integer, default=0)
-    seguidores_ganhos_periodo = Column(Integer, default=0)
     atualizado_em = Column(DateTime, default=datetime.utcnow)
 
     instagram_account = relationship("InstagramAccount")
 
 
-class InstagramTopPostCache(Base):
-    __tablename__ = "instagram_top_post_cache"
+class InstagramPostMetric(Base):
+    """Cada post do Instagram, com data e engajamento — não só o vencedor do momento.
+
+    Substitui o InstagramTopPostCache, que guardava um post só, escolhido entre os últimos 50
+    publicados e SEM olhar a data. O efeito era que o card de conteúdo orgânico mostrava, em
+    setembro, post de maio: bastava ele ter mais curtidas e nada tê-lo superado desde então.
+    Como cada conta publica em ritmo diferente, "os últimos 50" cobriam períodos diferentes
+    em cada marca, e nenhuma delas correspondia ao período escolhido no painel.
+
+    Guardando post a post, o melhor post passa a ser calculado para o período que estiver na
+    tela — mesma solução já usada no AdDailyMetric para o top 3 de criativos do Meta.
+    """
+
+    __tablename__ = "instagram_post_metrics"
+    __table_args__ = (UniqueConstraint("instagram_account_id", "post_id", name="uq_ig_conta_post"),)
 
     id = Column(Integer, primary_key=True)
-    instagram_account_id = Column(Integer, ForeignKey("instagram_accounts.id"), unique=True, nullable=False)
-    post_id = Column(String, nullable=True)
+    instagram_account_id = Column(Integer, ForeignKey("instagram_accounts.id"), nullable=False)
+    post_id = Column(String, nullable=False)
     legenda = Column(String, nullable=True)
     thumbnail_url = Column(String, nullable=True)
     permalink = Column(String, nullable=True)
@@ -152,6 +167,26 @@ class InstagramTopPostCache(Base):
     comentarios = Column(Integer, default=0)
     publicado_em = Column(DateTime, nullable=True)
     atualizado_em = Column(DateTime, default=datetime.utcnow)
+
+    instagram_account = relationship("InstagramAccount")
+
+
+class InstagramFollowerDaily(Base):
+    """Ganho líquido de seguidores por dia.
+
+    Antes guardávamos só o total dos últimos 30 dias corridos, somado no momento da
+    sincronização — um número que não mudava quando se trocava o período no painel, e que
+    hoje (4 de setembro) representava 5 de agosto a 4 de setembro, atravessando dois meses.
+    A API do Instagram já entrega dia a dia; éramos nós que somávamos antes de salvar.
+    """
+
+    __tablename__ = "instagram_follower_daily"
+    __table_args__ = (UniqueConstraint("instagram_account_id", "data", name="uq_ig_conta_dia"),)
+
+    id = Column(Integer, primary_key=True)
+    instagram_account_id = Column(Integer, ForeignKey("instagram_accounts.id"), nullable=False)
+    data = Column(Date, nullable=False)
+    ganho = Column(Integer, default=0)
 
     instagram_account = relationship("InstagramAccount")
 

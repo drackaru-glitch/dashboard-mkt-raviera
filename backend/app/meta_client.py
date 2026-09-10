@@ -18,15 +18,47 @@ BASE_URL = f"https://graph.facebook.com/{META_API_VERSION}"
 LEAD_ACTION_TYPE = "lead"
 WHATSAPP_ACTION_TYPE = "onsite_conversion.messaging_conversation_started_7d"
 
-# Campanhas de Geração de Cadastro (OUTCOME_LEADS) às vezes geram conversa de WhatsApp como
-# efeito colateral (alguém manda mensagem pela página), mas isso não é o resultado da
-# campanha — só contamos "conversa iniciada" como lead quando a campanha É de
-# engajamento/mensagens (OUTCOME_ENGAGEMENT), que é o objetivo usado pelas campanhas de
-# WhatsApp do grupo.
-OBJETIVOS_WHATSAPP = {"OUTCOME_ENGAGEMENT"}
+# Campanha de Geração de Cadastro (OUTCOME_LEADS) às vezes gera conversa de WhatsApp como
+# efeito colateral (alguém manda mensagem pela página), e isso não é o resultado da campanha
+# — só deve contar como lead quando o anúncio de verdade manda a pessoa pra uma conversa.
+#
+# Até aqui essa decisão era tomada pelo OBJETIVO da campanha (só contava se fosse
+# OUTCOME_ENGAGEMENT). Isso quebrou quando o grupo passou a rodar Click-to-WhatsApp DENTRO de
+# campanhas com objetivo OUTCOME_LEADS — configuração hoje comum no Meta, onde o objetivo da
+# campanha é "Geração de Cadastro" mas o CONJUNTO manda pra conversa. Resultado: em 09/09/2026,
+# 9 das 13 marcas do Felipe apareceram com ZERO lead no dia, incluindo contas que rotineiramente
+# convertem bem (Nissan CG gastou R$163 "sem gerar lead nenhum") — a conversa estava acontecendo
+# (`onsite_conversion.messaging_conversation_started_7d` de 8 a 27 por dia, por campanha), só
+# não era contada porque a campanha não era mais OUTCOME_ENGAGEMENT.
+#
+# O sinal confiável não é o objetivo da campanha, é o DESTINO DO CONJUNTO
+# (`destination_type` — WHATSAPP ou MESSENGER), que é propriedade do adset e reflete pra onde
+# o anúncio manda a pessoa de verdade, independente de como a campanha foi rotulada.
+DESTINOS_CONVERSA = {"WHATSAPP", "MESSENGER"}
 
 
-def _contar_leads(actions: list[dict] | None, objective: str | None) -> tuple[int, int]:
+def get_campaign_destinos(meta_account_id: str) -> dict[str, str]:
+    """Nome da campanha -> destino de conversa (WHATSAPP/MESSENGER), pras campanhas que têm.
+
+    Uma chamada leve e separada (~1 a 3s mesmo em conta grande — testado numa com 378
+    conjuntos): só dois campos escalares, nada de insight nem de criativo. `_contar_leads`
+    usa isso pra decidir se "conversa iniciada" é resultado do anúncio ou efeito colateral.
+    """
+    data = _get(
+        f"{meta_account_id}/adsets",
+        {"fields": "destination_type,campaign{name}", "limit": 500},
+        meta_account_id,
+    )
+    destinos: dict[str, str] = {}
+    for adset in data.get("data", []):
+        destino = adset.get("destination_type")
+        nome_campanha = (adset.get("campaign") or {}).get("name")
+        if nome_campanha and destino in DESTINOS_CONVERSA:
+            destinos[nome_campanha] = destino
+    return destinos
+
+
+def _contar_leads(actions: list[dict] | None, eh_campanha_de_conversa: bool) -> tuple[int, int]:
     leads_formulario = 0
     leads_whatsapp = 0
     for action in actions or []:
@@ -34,7 +66,7 @@ def _contar_leads(actions: list[dict] | None, objective: str | None) -> tuple[in
         qty = int(float(action.get("value", 0) or 0))
         if action_type == LEAD_ACTION_TYPE:
             leads_formulario += qty
-        elif action_type == WHATSAPP_ACTION_TYPE and objective in OBJETIVOS_WHATSAPP:
+        elif action_type == WHATSAPP_ACTION_TYPE and eh_campanha_de_conversa:
             leads_whatsapp += qty
     return leads_formulario, leads_whatsapp
 
@@ -113,7 +145,7 @@ def get_ad_account_balance(meta_account_id: str) -> dict:
     return {"saldo": saldo_centavos / 100, "moeda": currency}
 
 
-def get_daily_insights(meta_account_id: str, days: int = 30) -> list[dict]:
+def get_daily_insights(meta_account_id: str, days: int = 30, destinos: dict[str, str] | None = None) -> list[dict]:
     since = (date.today() - timedelta(days=days)).isoformat()
     until = date.today().isoformat()
     data = _get(
@@ -127,9 +159,11 @@ def get_daily_insights(meta_account_id: str, days: int = 30) -> list[dict]:
         },
         meta_account_id,
     )
+    destinos = destinos or {}
     rows = []
     for entry in data.get("data", []):
-        leads_formulario, leads_whatsapp = _contar_leads(entry.get("actions"), entry.get("objective"))
+        eh_conversa = entry.get("campaign_name") in destinos
+        leads_formulario, leads_whatsapp = _contar_leads(entry.get("actions"), eh_conversa)
         rows.append(
             {
                 "data": entry["date_start"],
@@ -142,10 +176,13 @@ def get_daily_insights(meta_account_id: str, days: int = 30) -> list[dict]:
     return rows
 
 
-def get_ads_daily(meta_account_id: str, since: str, until: str) -> list[dict]:
+def get_ads_daily(
+    meta_account_id: str, since: str, until: str, destinos: dict[str, str] | None = None
+) -> list[dict]:
     """Desempenho dia a dia de cada anúncio no intervalo [since, until] — usado pra calcular
     o top 3 de criativos de qualquer período (mês atual, mês anterior, etc.) sem precisar
     fazer uma chamada nova pra API toda vez que o filtro de período muda no dashboard."""
+    destinos = destinos or {}
     insights_range = f'{{"since":"{since}","until":"{until}"}}'
     data = _get(
         f"{meta_account_id}/ads",
@@ -165,8 +202,9 @@ def get_ads_daily(meta_account_id: str, since: str, until: str) -> list[dict]:
         campaign = ad.get("campaign") or {}
         creative = ad.get("creative") or {}
         thumbnail_url = creative.get("image_url") or creative.get("thumbnail_url")
+        eh_conversa = campaign.get("name") in destinos
         for dia in (ad.get("insights", {}) or {}).get("data", []):
-            leads_formulario, leads_whatsapp = _contar_leads(dia.get("actions"), campaign.get("objective"))
+            leads_formulario, leads_whatsapp = _contar_leads(dia.get("actions"), eh_conversa)
             rows.append(
                 {
                     "ad_id": ad.get("id"),

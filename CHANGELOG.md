@@ -4,6 +4,27 @@ Registro de versões do projeto. Uma versão nova é criada a cada conjunto de a
 
 ---
 
+## 0.56 — 2026-09-10
+
+### Correção crítica: lead de conversa (WhatsApp/Messenger) zerando em campanha de Geração de Cadastro
+- O sistema só contava "conversa iniciada" como lead quando o OBJETIVO da campanha era Engajamento (`OUTCOME_ENGAGEMENT`) — regra criada quando só campanha de engajamento gerava conversa de verdade; em campanha de Geração de Cadastro (`OUTCOME_LEADS`), conversa era tratada como efeito colateral (comentário no post) e descartada.
+- Isso quebrou quando o grupo passou a rodar **Click-to-WhatsApp dentro de campanhas com objetivo Geração de Cadastro** — configuração hoje comum no Meta. A campanha continua rotulada "Leads", mas manda a pessoa pra uma conversa de verdade.
+- Efeito real, medido: em 09/09/2026, **9 das 13 marcas do Felipe apareceram com ZERO lead no dia**, incluindo contas que convertem bem historicamente — Nissan Campo Grande gastou R$ 163 sem "gerar nenhum lead". A conversa estava acontecendo (6 a 27 conversas/dia por campanha), só não estava sendo contada.
+- **Correção:** o sinal usado agora é `destination_type` do CONJUNTO de anúncios (WHATSAPP/MESSENGER), não o objetivo da campanha — é a propriedade que o Meta usa pra saber pra onde o anúncio manda a pessoa de verdade, e não muda com o rótulo da campanha.
+- Impacto depois de corrigir: 09/09 saltou de 11 leads (CPL R$ 89,82) para **98 leads (CPL R$ 10,09)**. A tendência da semana, que vinha caindo suavemente até quase zero conforme se aproximava do dia atual, passou a ficar estável — confirmando que era bug de contagem, não atraso normal de atribuição do Meta.
+- Custo de sincronização: praticamente nenhum (+1 chamada leve por conta, ~1 a 3s mesmo numa conta com quase 400 conjuntos — sincronização completa foi de 113s pra 110s).
+- Afeta três lugares que dependiam dessa contagem: os KPIs do dashboard, o ranking de melhor anúncio por marca, e qualquer projeção de saldo que use CPL — todos corrigidos com esta sincronização.
+
+### Conteúdo orgânico mostrava post de outro mês
+- O card "Alcance Orgânico" escolhia o melhor post entre os últimos 50 publicados, SEM olhar a data — post antigo com muita curtida vencia pra sempre. Uma conta chegou a mostrar, em setembro, o post de 28 de maio.
+- O ganho de seguidores também ignorava o filtro de período: guardava só o total dos últimos 30 dias corridos no momento da sincronização, que não mudava ao trocar o filtro na tela.
+- Correção: agora guardamos cada post com sua data e o ganho de seguidores dia a dia (`InstagramPostMetric`, `InstagramFollowerDaily`) — o "melhor post" e o "ganho no período" são calculados na tela, pro período selecionado, igual já era feito pro top 3 de criativos do Meta.
+
+### Post do Alcance Orgânico agora abre no Instagram
+- Clicar em qualquer parte do post em destaque (miniatura, legenda ou curtidas) abre o post de verdade no Instagram, em nova aba — sem precisar procurar ele à mão.
+
+---
+
 ## 0.55 — 2026-09-01
 
 ### Monitor de tokens do Meta

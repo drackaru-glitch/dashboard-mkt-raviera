@@ -40,8 +40,9 @@ from app.models import (
     GoogleLocationCache,
     GoogleTopAdCache,
     InstagramAccount,
+    InstagramFollowerDaily,
+    InstagramPostMetric,
     InstagramStatsCache,
-    InstagramTopPostCache,
     MediaComentarioCache,
     SaldoCache,
     TokenSaude,
@@ -71,6 +72,11 @@ MAX_SYNC_WORKERS = 5 if not DATABASE_URL.startswith("sqlite") else 1
 # Antes as duas coisas andavam juntas na mesma thread, então no SQLite (MAX_SYNC_WORKERS=1)
 # cada conta esperava a anterior inteira, tempo de rede incluído.
 MAX_FETCH_WORKERS = 5
+
+# Por quantos dias pra trás guardamos a miniatura das publicações do Instagram. O painel
+# compara mês atual com mês anterior, então 70 dias cobrem qualquer combinação sem baixar as
+# 50 publicações de cada uma das 23 contas a cada sincronização.
+DIAS_MINIATURA_INSTAGRAM = 70
 
 # Se uma sincronização ficar "presa" por mais que isso (algo travou sem lançar exceção),
 # a próxima tentativa destrava e segue em vez de bloquear pra sempre com a mensagem de
@@ -106,12 +112,18 @@ def _demo_row_for_brand(brand: Brand, day: date, rng: random.Random) -> dict:
 
 
 def _buscar_meta_account(meta_account_id: str, days: int, since_criativos: str, until_criativos: str) -> dict:
-    """Faz as três chamadas à API do Meta de uma conta. Só rede, sem tocar no banco — é isso
+    """Faz as chamadas à API do Meta de uma conta. Só rede, sem tocar no banco — é isso
     que permite buscar várias contas ao mesmo tempo mesmo usando SQLite."""
+    # Precisa vir antes das duas de baixo: sem saber que campanha manda pra WhatsApp/Messenger
+    # (destination_type do conjunto, não o objetivo da campanha — ver meta_client), conversa
+    # iniciada em campanha de Geração de Cadastro fica de fora da contagem de lead. Foi
+    # exatamente isso que zerou o resultado de 9 das 13 marcas do Felipe em 09/09/2026, depois
+    # que passaram a rodar Click-to-WhatsApp dentro de campanha OUTCOME_LEADS.
+    destinos = meta_client.get_campaign_destinos(meta_account_id)
     return {
         "saldo": meta_client.get_ad_account_balance(meta_account_id),
-        "insights": meta_client.get_daily_insights(meta_account_id, days=days),
-        "ads_daily": meta_client.get_ads_daily(meta_account_id, since_criativos, until_criativos),
+        "insights": meta_client.get_daily_insights(meta_account_id, days=days, destinos=destinos),
+        "ads_daily": meta_client.get_ads_daily(meta_account_id, since_criativos, until_criativos, destinos=destinos),
     }
 
 
@@ -530,17 +542,37 @@ def _sync_funil(db: Session, days: int) -> int:
 
 def _buscar_instagram_account(instagram_business_id: str, access_token: str, days: int) -> dict:
     """Só chamadas de rede, sem tocar no banco — por isso roda em paralelo (mesma ideia do Meta)."""
-    # A listagem de posts é buscada uma vez e usada duas: aqui, pro melhor post do período, e
+    # A listagem de posts é buscada uma vez e usada duas: aqui, pro conteúdo orgânico, e
     # depois em _sync_social, pros comentários — que assim não custam requisição nenhuma.
     posts = instagram_client.get_media(instagram_business_id, access_token)
-    top_post = instagram_client.get_top_post(instagram_business_id, access_token, posts=posts)
-    if top_post:
-        # mesmo motivo dos criativos: a URL do Meta expira, guardamos a imagem localmente.
-        top_post["thumbnail_url"] = media_cache.baixar_imagem(top_post["thumbnail_url"], "instagram", top_post["post_id"])
+
+    # A URL de imagem do Meta expira, então guardamos a miniatura localmente — mas só das
+    # publicações recentes. Baixar as 50 de cada uma das 23 contas seria mais de mil imagens
+    # por sincronização; o painel só mostra mês atual e mês anterior, e o cache em disco faz
+    # a mesma imagem não ser baixada duas vezes.
+    corte_miniatura = date.today() - timedelta(days=DIAS_MINIATURA_INSTAGRAM)
+    enriquecidos = []
+    for p in posts:
+        publicado = _ts(p.get("timestamp"))
+        thumb = None
+        if publicado and publicado.date() >= corte_miniatura:
+            thumb = media_cache.baixar_imagem(p.get("thumbnail_url") or p.get("media_url"), "instagram", p["id"])
+        enriquecidos.append(
+            {
+                "post_id": p.get("id"),
+                "legenda": (p.get("caption") or "").strip(),
+                "thumbnail_url": thumb,
+                "permalink": p.get("permalink"),
+                "curtidas": int(p.get("like_count", 0) or 0),
+                "comentarios": int(p.get("comments_count", 0) or 0),
+                "publicado_em": publicado,
+            }
+        )
+
     return {
         "seguidores_atual": instagram_client.get_followers_count(instagram_business_id, access_token),
-        "seguidores_ganhos": instagram_client.get_follower_gain(instagram_business_id, access_token, days=days),
-        "top_post": top_post,
+        "ganhos_diarios": instagram_client.get_follower_gain_daily(instagram_business_id, access_token, days=days),
+        "metricas_posts": enriquecidos,
         "posts": posts,
     }
 
@@ -590,42 +622,77 @@ def _sync_instagram_account(db: Session, account: InstagramAccount, days: int, d
     if not account.access_token:
         rng = random.Random(account.id * 53)
         seguidores_atual = 500 + (account.id * 733) % 12000
-        seguidores_ganhos = round((5 + account.id % 20) * (days / 30) * (0.7 + rng.random() * 0.8))
-        top_post = {
-            "post_id": f"demo-post-{account.id}",
-            "legenda": f"Post demo — {account.nome}",
-            "thumbnail_url": None,
-            "permalink": None,
-            "curtidas": 40 + rng.randint(0, 300),
-            "comentarios": rng.randint(0, 30),
-            "publicado_em": None,
-        }
+        hoje = date.today()
+        ganhos_diarios = [
+            {"data": hoje - timedelta(days=i), "ganho": rng.randint(-2, 8)} for i in range(days)
+        ]
+        metricas_posts = [
+            {
+                "post_id": f"demo-post-{account.id}-{i}",
+                "legenda": f"Post demo {i + 1} — {account.nome}",
+                "thumbnail_url": None,
+                "permalink": None,
+                "curtidas": 40 + rng.randint(0, 300),
+                "comentarios": rng.randint(0, 30),
+                "publicado_em": datetime.combine(hoje - timedelta(days=i * 4), datetime.min.time()),
+            }
+            for i in range(12)
+        ]
     else:
         seguidores_atual = dados["seguidores_atual"]
-        seguidores_ganhos = dados["seguidores_ganhos"]
-        top_post = dados["top_post"]
+        ganhos_diarios = dados["ganhos_diarios"]
+        metricas_posts = dados["metricas_posts"]
 
+    # Seguidores no total é um retrato do momento, não um acumulado — continua em cache.
     stats = db.query(InstagramStatsCache).filter(InstagramStatsCache.instagram_account_id == account.id).first()
     if not stats:
         stats = InstagramStatsCache(instagram_account_id=account.id)
         db.add(stats)
     stats.seguidores_atual = seguidores_atual
-    stats.seguidores_ganhos_periodo = seguidores_ganhos
     stats.atualizado_em = datetime.utcnow()
 
-    if top_post:
-        post_cache = db.query(InstagramTopPostCache).filter(InstagramTopPostCache.instagram_account_id == account.id).first()
-        if not post_cache:
-            post_cache = InstagramTopPostCache(instagram_account_id=account.id)
-            db.add(post_cache)
-        post_cache.post_id = top_post["post_id"]
-        post_cache.legenda = top_post["legenda"]
-        post_cache.thumbnail_url = top_post["thumbnail_url"]
-        post_cache.permalink = top_post["permalink"]
-        post_cache.curtidas = top_post["curtidas"]
-        post_cache.comentarios = top_post["comentarios"]
-        post_cache.publicado_em = top_post["publicado_em"]
-        post_cache.atualizado_em = datetime.utcnow()
+    # Ganho de seguidores dia a dia — o painel soma o intervalo que estiver selecionado.
+    existentes_dia = {
+        linha.data: linha
+        for linha in db.query(InstagramFollowerDaily)
+        .filter(InstagramFollowerDaily.instagram_account_id == account.id)
+        .all()
+    }
+    for linha in ganhos_diarios:
+        atual = existentes_dia.get(linha["data"])
+        if atual:
+            atual.ganho = linha["ganho"]
+        else:
+            db.add(
+                InstagramFollowerDaily(
+                    instagram_account_id=account.id, data=linha["data"], ganho=linha["ganho"]
+                )
+            )
+
+    # Cada post com sua data: o "melhor post" deixa de ser escolhido aqui e passa a ser
+    # calculado na tela, para o período que estiver selecionado.
+    existentes_post = {
+        p.post_id: p
+        for p in db.query(InstagramPostMetric)
+        .filter(InstagramPostMetric.instagram_account_id == account.id)
+        .all()
+    }
+    for p in metricas_posts:
+        if not p.get("post_id"):
+            continue
+        alvo = existentes_post.get(p["post_id"])
+        if not alvo:
+            alvo = InstagramPostMetric(instagram_account_id=account.id, post_id=p["post_id"])
+            db.add(alvo)
+        alvo.legenda = p["legenda"]
+        # Miniatura só é baixada pros posts recentes; não apaga a que já existe.
+        if p["thumbnail_url"]:
+            alvo.thumbnail_url = p["thumbnail_url"]
+        alvo.permalink = p["permalink"]
+        alvo.curtidas = p["curtidas"]
+        alvo.comentarios = p["comentarios"]
+        alvo.publicado_em = p["publicado_em"]
+        alvo.atualizado_em = datetime.utcnow()
 
 
 def _ts(valor: str | None) -> datetime | None:

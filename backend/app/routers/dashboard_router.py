@@ -23,8 +23,9 @@ from app.models import (
     GoogleDailyMetric,
     GoogleKeywordCache,
     GoogleLocationCache,
+    InstagramFollowerDaily,
+    InstagramPostMetric,
     InstagramStatsCache,
-    InstagramTopPostCache,
     SaldoCache,
     TokenSaude,
     User,
@@ -189,32 +190,60 @@ def get_dashboard(user: User = Depends(get_current_user), db: Session = Depends(
     for b in brands:
         if b.instagram_account_id:
             brands_by_ig_account.setdefault(b.instagram_account_id, []).append(b)
-    for ig_account_id, ig_brands in brands_by_ig_account.items():
-        stats = db.query(InstagramStatsCache).filter(InstagramStatsCache.instagram_account_id == ig_account_id).first()
-        post = db.query(InstagramTopPostCache).filter(InstagramTopPostCache.instagram_account_id == ig_account_id).first()
-        account = ig_brands[0].instagram_account
-        organico.append(
-            {
-                "instagramAccountId": ig_account_id,
-                "username": account.username,
-                "nomeConta": account.nome,
-                "marcas": [b.nome for b in ig_brands],
-                "seguidoresAtual": stats.seguidores_atual if stats else 0,
-                "seguidoresGanhosPeriodo": stats.seguidores_ganhos_periodo if stats else 0,
-                "topPost": (
-                    {
-                        "legenda": post.legenda,
-                        "thumbnailUrl": post.thumbnail_url,
-                        "permalink": post.permalink,
-                        "curtidas": post.curtidas,
-                        "comentarios": post.comentarios,
-                        "publicadoEm": post.publicado_em.isoformat() if post.publicado_em else None,
-                    }
-                    if post
-                    else None
-                ),
-            }
-        )
+    # Conteúdo orgânico sai daqui em bruto — publicações com data e ganho de seguidores dia a
+    # dia — e é a tela que recorta pelo período selecionado, igual ao tráfego e aos criativos.
+    # Antes daqui saía um "melhor post" já escolhido e um total fixo de 30 dias corridos: o
+    # card mostrava, em setembro, publicação de maio, e não mudava ao trocar o filtro.
+    if brands_by_ig_account:
+        ids_contas = list(brands_by_ig_account)
+        stats_por_conta = {
+            s.instagram_account_id: s
+            for s in db.query(InstagramStatsCache)
+            .filter(InstagramStatsCache.instagram_account_id.in_(ids_contas))
+            .all()
+        }
+        ganhos_por_conta: dict[int, list[dict]] = {}
+        for linha in (
+            db.query(InstagramFollowerDaily)
+            .filter(InstagramFollowerDaily.instagram_account_id.in_(ids_contas))
+            .all()
+        ):
+            ganhos_por_conta.setdefault(linha.instagram_account_id, []).append(
+                {"data": linha.data.isoformat(), "ganho": linha.ganho}
+            )
+        posts_por_conta: dict[int, list[dict]] = {}
+        for p in (
+            db.query(InstagramPostMetric)
+            .filter(InstagramPostMetric.instagram_account_id.in_(ids_contas))
+            .order_by(InstagramPostMetric.publicado_em.desc())
+            .all()
+        ):
+            posts_por_conta.setdefault(p.instagram_account_id, []).append(
+                {
+                    "postId": p.post_id,
+                    "legenda": p.legenda,
+                    "thumbnailUrl": p.thumbnail_url,
+                    "permalink": p.permalink,
+                    "curtidas": p.curtidas,
+                    "comentarios": p.comentarios,
+                    "publicadoEm": p.publicado_em.isoformat() if p.publicado_em else None,
+                }
+            )
+
+        for ig_account_id, ig_brands in brands_by_ig_account.items():
+            stats = stats_por_conta.get(ig_account_id)
+            account = ig_brands[0].instagram_account
+            organico.append(
+                {
+                    "instagramAccountId": ig_account_id,
+                    "username": account.username,
+                    "nomeConta": account.nome,
+                    "marcas": [b.nome for b in ig_brands],
+                    "seguidoresAtual": stats.seguidores_atual if stats else 0,
+                    "ganhosDiarios": ganhos_por_conta.get(ig_account_id, []),
+                    "posts": posts_por_conta.get(ig_account_id, []),
+                }
+            )
 
     noticias = _build_noticias(db, brands)
 

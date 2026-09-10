@@ -46,7 +46,7 @@
 
 <script type="text/babel" data-presets="react">
 const { useState, useMemo, useEffect, useRef } = React;
-const APP_VERSION = "0.55";
+const APP_VERSION = "0.56";
 
 /* ================================================================== */
 /* 1) CLIENTE DA API (backend próprio, substitui o Apps Script)         */
@@ -742,9 +742,45 @@ function NewsCarousel({ itens, dark, mutedText }) {
   );
 }
 
-function OrganicAccountCard({ item, dark, cardBg, mutedText }) {
-  const post = item.topPost;
-  const ganho = item.seguidoresGanhosPeriodo || 0;
+// Vira <a> quando há permalink (abre o post de verdade no Instagram, em outra aba); sem
+// permalink cai pra <div> comum — não faz sentido um link que não leva a lugar nenhum.
+function PostLink({ permalink, dark, children }) {
+  const className = "flex gap-3 items-center -m-1 p-1 rounded-lg" +
+    (permalink ? " transition-colors " + (dark ? "hover:bg-neutral-800/70" : "hover:bg-neutral-100") : "");
+  if (!permalink) return <div className={className}>{children}</div>;
+  return (
+    <a href={permalink} target="_blank" rel="noopener noreferrer" title="Abrir no Instagram" className={className}>
+      {children}
+    </a>
+  );
+}
+
+function OrganicAccountCard({ item, dark, cardBg, mutedText, range }) {
+  // O período é aplicado aqui, não no servidor: a conta chega com o ganho de seguidores dia a
+  // dia e com todas as publicações datadas, e o card recorta o intervalo selecionado — mesma
+  // mecânica do tráfego e do top 3 de criativos. Antes, o backend mandava um vencedor já
+  // escolhido entre as últimas 50 publicações, sem olhar data, e o card exibia post de maio
+  // como se fosse do mês corrente.
+  const { post, ganho } = useMemo(() => {
+    // Compara por DIA, como parseDateLocal/filterByRange fazem no resto do sistema. O
+    // range.end é meia-noite de hoje: comparando data e hora, uma publicação feita hoje à
+    // tarde ficaria de fora do próprio dia dela.
+    const dentro = (iso) => {
+      if (!iso) return false;
+      const d = parseDateLocal(iso.slice(0, 10));
+      return d >= range.start && d <= range.end;
+    };
+    const ganhoPeriodo = (item.ganhosDiarios || [])
+      .filter((g) => dentro(g.data))
+      .reduce((a, g) => a + (g.ganho || 0), 0);
+    const doPeriodo = (item.posts || []).filter((p) => dentro(p.publicadoEm));
+    const melhor = doPeriodo.reduce(
+      (a, p) => (a === null || (p.curtidas || 0) > (a.curtidas || 0) ? p : a),
+      null
+    );
+    return { post: melhor, ganho: ganhoPeriodo };
+  }, [item, range.start, range.end]);
+
   const ganhoPositivo = ganho >= 0;
   return (
     <div className={"rounded-xl border p-4 flex flex-col gap-3 " + cardBg}>
@@ -766,7 +802,11 @@ function OrganicAccountCard({ item, dark, cardBg, mutedText }) {
       </div>
 
       {post ? (
-        <div className="flex gap-3 items-center">
+        // Post inteiro é um link pro Instagram — clicar em qualquer parte (miniatura, legenda
+        // ou curtidas) abre o post de verdade, pra quem tá analisando não precisar procurar
+        // ele à mão dentro do Instagram. Sem permalink (posts demo, ou conta ainda sem
+        // sincronizar), cai pra div comum — sem link morto.
+        <PostLink permalink={post.permalink} dark={dark}>
           <div className={"h-16 w-16 shrink-0 rounded-lg overflow-hidden flex items-center justify-center " + (dark ? "bg-neutral-800" : "bg-neutral-100")}>
             {post.thumbnailUrl ? (
               <img src={post.thumbnailUrl} alt="Post" className="h-full w-full object-cover" />
@@ -780,9 +820,10 @@ function OrganicAccountCard({ item, dark, cardBg, mutedText }) {
               <IconHeart className="h-3 w-3" /> {fmtNum(post.curtidas)} · {fmtNum(post.comentarios)} comentários
             </p>
           </div>
-        </div>
+          {post.permalink && <IconArrowUp className={"h-3.5 w-3.5 shrink-0 rotate-45 " + mutedText} />}
+        </PostLink>
       ) : (
-        <p className={"text-xs " + mutedText}>Sem posts sincronizados ainda.</p>
+        <p className={"text-xs " + mutedText}>Nenhuma publicação neste período.</p>
       )}
     </div>
   );
@@ -3032,7 +3073,7 @@ function RavieraDashboard({ token, role, email, nome, permissoes, justLoggedIn, 
                 <p className={"text-xs mb-3 " + mutedText}>Post com mais curtidas e seguidores conquistados no período, por conta</p>
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
                   {organicoToRender.map((item) => (
-                    <OrganicAccountCard key={item.instagramAccountId} item={item} dark={dark} cardBg={cardBg} mutedText={mutedText} />
+                    <OrganicAccountCard key={item.instagramAccountId} item={item} dark={dark} cardBg={cardBg} mutedText={mutedText} range={range} />
                   ))}
                 </div>
                 {hasMoreOrganico && (
