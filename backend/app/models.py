@@ -33,6 +33,17 @@ class User(Base):
     ver_funil = Column(Boolean, nullable=False, default=True)
     ver_noticias = Column(Boolean, nullable=False, default=True)
 
+    # Ordem em que a pessoa arrastou os quadros do painel principal (JSON de uma lista de
+    # ids, ex.: '["saldo","evolucao","topCriativos",...]'). None = nunca mexeu, usa a ordem
+    # padrão do frontend. Fica ligado à conta (não ao navegador) pra não precisar reorganizar
+    # de novo a cada login em outro computador.
+    ordem_blocos = Column(String, nullable=True)
+
+    # Até quando a pessoa já viu as notificações do sino — não é lida por notificação (o
+    # sistema é pequeno demais pra precisar disso); só um cursor. Notificação com criado_em
+    # depois disso conta como não lida.
+    notificacoes_lidas_ate = Column(DateTime, nullable=True)
+
     brands = relationship("UserBrand", back_populates="user", cascade="all, delete-orphan")
 
 
@@ -73,14 +84,27 @@ class Brand(Base):
 
     id = Column(Integer, primary_key=True)
     nome = Column(String, unique=True, nullable=False)
-    tier = Column(String, default="")
     ad_account_id = Column(Integer, ForeignKey("ad_accounts.id"), nullable=True)
     campaign_filter = Column(String, nullable=True)  # prefixo do nome da campanha, quando a conta é compartilhada
-    diario_esperado_meta = Column(Float, default=0)
+    diario_esperado_meta = Column(Float, default=0)  # PLANEJADO: quanto a pessoa decidiu gastar por dia
     analista = Column(String, default="")
     instagram_account_id = Column(Integer, ForeignKey("instagram_accounts.id"), nullable=True)
     google_ads_account_id = Column(Integer, ForeignKey("google_ads_accounts.id"), nullable=True)
     google_orcamento_mensal = Column(Float, default=0)  # verba mensal definida manualmente pra essa marca no Google Ads
+
+    # REAL: soma do daily_budget das campanhas ativas dessa marca, lido do Meta a cada
+    # sincronização — não depende de ninguém digitar nada, por isso pode divergir do
+    # planejado acima (alguém reajustou orçamento na campanha e esqueceu de atualizar aqui).
+    orcamento_diario_real = Column(Float, nullable=True)
+    orcamento_atualizado_em = Column(DateTime, nullable=True)
+
+    # Status do runway de saldo (ok/atencao/critico/semDados) na última sincronização — só
+    # serve pra saber se PIOROU desde a última vez, e assim não notificar de novo a cada
+    # sincronização enquanto a marca continuar crítica.
+    ultimo_status_saldo = Column(String, nullable=True)
+
+    # Mesma ideia acima, pro alerta de "orçamento real zerado" (todas as campanhas pausadas).
+    ultimo_orcamento_real_zerado = Column(Boolean, nullable=True)
 
     ad_account = relationship("AdAccount", back_populates="brands")
     instagram_account = relationship("InstagramAccount", back_populates="brands")
@@ -98,6 +122,68 @@ class UserBrand(Base):
 
     user = relationship("User", back_populates="brands")
     brand = relationship("Brand", back_populates="user_links")
+
+
+class MetaRegionCache(Base):
+    """Gasto/leads por estado (breakdown `region` do Meta) — o Meta não tem quebra por
+    cidade nos insights (só region/país/dma, e dma é só EUA), diferente do Google Ads. Ver
+    MetaCidadeCache para a lista de cidades que as campanhas têm CONFIGURADAS por estado —
+    isso é intenção de segmentação, não resultado real, os dois não devem ser confundidos."""
+
+    __tablename__ = "meta_region_cache"
+    __table_args__ = (UniqueConstraint("brand_id", "regiao", name="uq_meta_region_brand"),)
+
+    id = Column(Integer, primary_key=True)
+    brand_id = Column(Integer, ForeignKey("brands.id"), nullable=False)
+    regiao = Column(String, nullable=False)
+    gasto = Column(Float, default=0)
+    leads = Column(Integer, default=0)
+    atualizado_em = Column(DateTime, default=datetime.utcnow)
+
+
+class MetaCidadeCache(Base):
+    """Cidades que os conjuntos de anúncio ATIVOS de cada marca têm configuradas como
+    segmentação, agrupadas por estado — é o que abre quando alguém clica num estado no mapa
+    de calor. Vem do `targeting.geo_locations` dos conjuntos, não é dado de resultado."""
+
+    __tablename__ = "meta_cidade_cache"
+    __table_args__ = (UniqueConstraint("brand_id", "regiao", "cidade", name="uq_meta_cidade"),)
+
+    id = Column(Integer, primary_key=True)
+    brand_id = Column(Integer, ForeignKey("brands.id"), nullable=False)
+    regiao = Column(String, nullable=False)
+    cidade = Column(String, nullable=False)
+    atualizado_em = Column(DateTime, default=datetime.utcnow)
+
+
+class MetaAprendizadoAlertado(Base):
+    """Lembra qual ciclo de aprendizado (`last_sig_edit_ts` do Meta) de cada conjunto já gerou
+    o alerta de "aprendizado travado" — pra não repetir a notificação todo dia enquanto o MESMO
+    ciclo continuar preso, mas avisar de novo se a pessoa editar o conjunto (o que reinicia o
+    aprendizado) e ele travar de novo depois. Não guarda "desde quando" por conta própria: o
+    Meta já manda isso pronto em `last_sig_edit_ts`, ver app.notificacoes.gerar_alertas_aprendizado_travado."""
+
+    __tablename__ = "meta_aprendizado_alertado"
+
+    id = Column(Integer, primary_key=True)
+    adset_id = Column(String, unique=True, nullable=False)
+    last_sig_edit_ts = Column(Integer, nullable=False)
+    atualizado_em = Column(DateTime, default=datetime.utcnow)
+
+
+class MetaPublicoSobrepostoAlertado(Base):
+    """Lembra qual GRUPO de conjuntos (por adset_id, ordenados) já gerou o alerta de "público
+    sobreposto" pra uma assinatura de público de uma marca — pra não repetir a notificação
+    todo dia enquanto o MESMO grupo continuar sobreposto, mas avisar de novo se o grupo mudar
+    (um conjunto novo entrou nele, ou um saiu). Ver app.notificacoes.gerar_alertas_publico_sobreposto."""
+
+    __tablename__ = "meta_publico_sobreposto_alertado"
+
+    id = Column(Integer, primary_key=True)
+    brand_id = Column(Integer, ForeignKey("brands.id"), nullable=False)
+    assinatura_hash = Column(String, unique=True, nullable=False)
+    adset_ids = Column(String, nullable=False)  # ids ordenados, separados por vírgula
+    atualizado_em = Column(DateTime, default=datetime.utcnow)
 
 
 class DailyMetric(Base):
@@ -257,6 +343,44 @@ class FollowizeTeamMap(Base):
 
     id = Column(Integer, primary_key=True)
     team_nome = Column(String, unique=True, nullable=False)
+    brand_id = Column(Integer, ForeignKey("brands.id"), nullable=False)
+
+    brand = relationship("Brand")
+
+
+class LetalkLeadEvent(Base):
+    """Captura bruta dos webhooks da Letalk — disparados quando o contato do WhatsApp recebe
+    uma tag ("Lead", "Não Responderam" ou "Test Drive"). A Letalk manda o estado ATUAL de
+    TODAS as tags do contato a cada disparo (não um "diff" de qual tag mudou agora), por isso
+    `tags` aqui é uma foto do momento, não um evento isolado — a leitura de qual tag é nova
+    fica pra quando formos agregar isso de verdade, comparando com o evento anterior do mesmo
+    telefone. brand_id fica nulo até o campo personalizado "marca" (ver LetalkMarcaMap) estar
+    configurado no fluxo da Letalk que gerou esse evento."""
+
+    __tablename__ = "letalk_lead_events"
+
+    id = Column(Integer, primary_key=True)
+    telefone = Column(String, nullable=True)
+    nome = Column(String, nullable=True)
+    email = Column(String, nullable=True)
+    marca_nome = Column(String, nullable=True)
+    tags = Column(String, nullable=True)
+    brand_id = Column(Integer, ForeignKey("brands.id"), nullable=True)
+    payload_bruto = Column(String, nullable=True)
+    recebido_em = Column(DateTime, default=datetime.utcnow)
+
+    brand = relationship("Brand")
+
+
+class LetalkMarcaMap(Base):
+    """Mapeia o valor do campo personalizado "marca" (configurado à mão no fluxo de
+    automação da Letalk de cada loja) pra uma marca nossa — preenchido manualmente em
+    Configuração assim que cada fluxo tiver esse campo."""
+
+    __tablename__ = "letalk_marca_map"
+
+    id = Column(Integer, primary_key=True)
+    marca_nome = Column(String, unique=True, nullable=False)
     brand_id = Column(Integer, ForeignKey("brands.id"), nullable=False)
 
     brand = relationship("Brand")
@@ -437,6 +561,11 @@ class TokenSaude(Base):
     erro = Column(String, nullable=True)
     atualizado_em = Column(DateTime, default=datetime.utcnow)
 
+    # Já avisou no sino que esse token está precisando de atenção? Evita notificar de novo a
+    # cada sincronização enquanto ninguém troca o token — reseta sozinho quando ele volta a
+    # ficar saudável (ver app.notificacoes.gerar_alertas_token).
+    alertado = Column(Boolean, nullable=False, default=False)
+
 
 class MediaComentarioCache(Base):
     """Última contagem de comentários vista em cada mídia.
@@ -452,6 +581,33 @@ class MediaComentarioCache(Base):
     media_id = Column(String, unique=True, nullable=False, index=True)
     comentarios_count = Column(Integer, default=0)
     atualizado_em = Column(DateTime, default=datetime.utcnow)
+
+
+class ModeloVeiculo(Base):
+    """Modelos de veículo que o interpretador de anúncios de concorrentes
+    (app.concorrentes_parser) sabe reconhecer no texto.
+
+    Fica no banco em vez de fixo no código de propósito: a lista sempre cresce por reação, não
+    por antecipação. Começou só com Toyota (a Kampai, primeiro concorrente cadastrado), ganhou
+    Jeep/Honda/Hyundai quando o pátio de seminovos deles apareceu multimarca, e só ganhou Ford
+    inteira quando a Recol (concessionária Ford) foi cadastrada e nenhum dos 7 anúncios dela
+    reconheceu modelo. Com a lista editável aqui, um concorrente de marca nova não exige mais
+    alterar código — só adicionar a linha.
+
+    `modelo` é o nome puro (ex.: "Corolla Cross", "T-Cross") — o padrão de busca é construído
+    sozinho a partir dele (ver concorrentes_parser.construir_padrao), então não tem regex pra
+    escrever à mão. Nomes compostos não precisam vir em ordem especial na tabela: o parser
+    sempre tenta o nome mais comprido primeiro, senão "Corolla Cross" seria lido como "Corolla".
+    """
+
+    __tablename__ = "modelos_veiculo"
+    __table_args__ = (UniqueConstraint("marca", "modelo", name="uq_marca_modelo"),)
+
+    id = Column(Integer, primary_key=True)
+    marca = Column(String, nullable=False)
+    modelo = Column(String, nullable=False)
+    ativo = Column(Boolean, nullable=False, default=True)
+    criado_em = Column(DateTime, default=datetime.utcnow)
 
 
 class Concorrente(Base):
@@ -525,4 +681,33 @@ class ConcorrenteColeta(Base):
     anuncios_encontrados = Column(Integer, default=0)
     anuncios_novos = Column(Integer, default=0)
     anuncios_encerrados = Column(Integer, default=0)
+    criado_em = Column(DateTime, default=datetime.utcnow)
+
+
+class Notificacao(Base):
+    """Item do sino de notificações. `brand_id` nulo = notificação geral (nova versão do
+    sistema) — todo mundo vê. Com marca = alerta específico (saldo crítico, gasto fora da
+    curva) — só quem tem acesso a essa marca vê."""
+
+    __tablename__ = "notificacoes"
+
+    id = Column(Integer, primary_key=True)
+    tipo = Column(String, nullable=False)  # "saldo_critico" | "gasto_anomalo" | "versao"
+    titulo = Column(String, nullable=False)
+    mensagem = Column(String, nullable=False)
+    brand_id = Column(Integer, ForeignKey("brands.id"), nullable=True)
+    criado_em = Column(DateTime, default=datetime.utcnow)
+
+    brand = relationship("Brand")
+
+
+class SistemaEstado(Base):
+    """Uma linha só (singleton) com estado geral do backend que precisa sobreviver a
+    reinícios — hoje só a última versão notificada no sino, pra saber quando uma versão nova
+    subiu e ninguém ainda foi avisado."""
+
+    __tablename__ = "sistema_estado"
+
+    id = Column(Integer, primary_key=True)
+    ultima_versao_notificada = Column(String, nullable=True)
     criado_em = Column(DateTime, default=datetime.utcnow)

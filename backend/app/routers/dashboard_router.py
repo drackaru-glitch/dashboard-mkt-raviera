@@ -26,13 +26,19 @@ from app.models import (
     InstagramFollowerDaily,
     InstagramPostMetric,
     InstagramStatsCache,
+    MetaCidadeCache,
+    MetaRegionCache,
     SaldoCache,
     TokenSaude,
     User,
 )
 from app.news_client import MARCAS_CHAVE
 from app import concorrentes as concorrentes_svc
+from app import notificacoes
 from app.sync import SyncEmAndamento, sync_all
+
+if not META_DEMO_MODE:
+    from app import meta_client
 
 router = APIRouter(prefix="/api", tags=["dashboard"])
 
@@ -145,6 +151,18 @@ def get_dashboard(user: User = Depends(get_current_user), db: Session = Depends(
                 }
             )
 
+    # Gasto real médio dos últimos dias FECHADOS por marca — mesmo cálculo do alerta de
+    # orçamento subutilizado (notificacoes.py), reaproveitado aqui pra reforçar visualmente a
+    # tabela de Saldo sem esperar a notificação (e pra quem já tiver lido/dispensado o alerta).
+    # Reaproveita `metrics` (já buscado acima pro gráfico) — nenhuma query extra.
+    ontem = date.today() - timedelta(days=1)
+    inicio_janela_orc = ontem - timedelta(days=notificacoes.ORCAMENTO_SUBUTILIZADO_DIAS - 1)
+    gastos_recentes_por_marca: dict[int, list[float]] = {}
+    if brand_ids:
+        for m in metrics:
+            if inicio_janela_orc <= m.data <= ontem:
+                gastos_recentes_por_marca.setdefault(m.brand_id, []).append(m.gasto)
+
     saldos = []
     for b in brands:
         cache = (
@@ -152,14 +170,26 @@ def get_dashboard(user: User = Depends(get_current_user), db: Session = Depends(
             if b.ad_account_id
             else None
         )
+        gastos_recentes = gastos_recentes_por_marca.get(b.id, [])
+        gasto_medio_recente = sum(gastos_recentes) / len(gastos_recentes) if gastos_recentes else None
+        orcamento_subutilizado = (
+            b.orcamento_diario_real is not None
+            and b.orcamento_diario_real >= notificacoes.ORCAMENTO_SUBUTILIZADO_MINIMO
+            and gasto_medio_recente is not None
+            and len(gastos_recentes) >= notificacoes.ORCAMENTO_SUBUTILIZADO_DIAS
+            and (gasto_medio_recente / b.orcamento_diario_real) <= notificacoes.LIMIAR_ORCAMENTO_SUBUTILIZADO
+        )
         saldos.append(
             {
                 "brandId": b.id,
                 "marca": b.nome,
-                "tier": b.tier,
                 "saldoAtualMeta": cache.saldo if cache else 0,
                 "moeda": cache.moeda if cache else "BRL",
-                "diarioEsperadoMeta": b.diario_esperado_meta,
+                "diarioEsperadoMeta": b.diario_esperado_meta,  # planejado (digitado à mão)
+                "orcamentoDiarioReal": b.orcamento_diario_real,  # real (lido do Meta na sincronização)
+                "orcamentoAtualizadoEm": _iso_utc(b.orcamento_atualizado_em),
+                "gastoMedioRecente": gasto_medio_recente,
+                "orcamentoSubutilizado": orcamento_subutilizado,
             }
         )
 
@@ -247,6 +277,34 @@ def get_dashboard(user: User = Depends(get_current_user), db: Session = Depends(
 
     noticias = _build_noticias(db, brands)
 
+    # Mapa de calor por estado — nível mais fino de localização REAL que o Meta expõe (ver
+    # meta_client.get_region_performance). Só a lista de cidades configuradas por estado vem
+    # aqui; os nomes das cidades em si só são buscados ao abrir (endpoint /cidades-configuradas
+    # abaixo), pra não mandar isso tudo em toda carga do painel à toa.
+    mapa_calor_meta = []
+    if brand_ids:
+        regioes_por_marca: dict[int, list] = {}
+        for r in db.query(MetaRegionCache).filter(MetaRegionCache.brand_id.in_(brand_ids)).all():
+            regioes_por_marca.setdefault(r.brand_id, []).append(r)
+        for b in brands:
+            regioes = regioes_por_marca.get(b.id)
+            if not regioes:
+                continue
+            # Segmentação ampla (ou remarketing) sempre alcança uns centavos de gasto em
+            # estado nenhum a ver com o negócio — mostrar isso como "estado" no mapa é ruído,
+            # não sinal. Só entra estado com gasto de verdade OU que gerou lead de verdade.
+            relevantes = [r for r in regioes if r.gasto >= 10 or r.leads > 0]
+            relevantes.sort(key=lambda r: (r.leads, r.gasto), reverse=True)
+            if not relevantes:
+                continue
+            mapa_calor_meta.append(
+                {
+                    "brandId": b.id,
+                    "marca": b.nome,
+                    "regioes": [{"regiao": r.regiao, "gasto": r.gasto, "leads": r.leads} for r in relevantes[:8]],
+                }
+            )
+
     last_sync = None
     if brand_ids:
         latest_cache = (
@@ -258,14 +316,71 @@ def get_dashboard(user: User = Depends(get_current_user), db: Session = Depends(
         last_sync = _iso_utc(latest_cache.atualizado_em if latest_cache else None)
 
     return {
-        "brands": [{"id": b.id, "nome": b.nome, "tier": b.tier, "analista": b.analista} for b in brands],
+        "brands": [{"id": b.id, "nome": b.nome, "analista": b.analista} for b in brands],
         "trafego": trafego,
         "saldos": saldos,
         "criativosDiarios": criativos_diarios,
         "organico": organico,
         "noticias": noticias,
+        "mapaCalorMeta": mapa_calor_meta,
         "meta": {"lastSync": last_sync, "demoMode": META_DEMO_MODE, "tokens": _saude_tokens(db)},
     }
+
+
+@router.get("/cidades-configuradas")
+def cidades_configuradas(
+    brand_id: int, regiao: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+):
+    """Cidades que os conjuntos ativos dessa marca têm configuradas como segmentação nesse
+    estado — aberto ao clicar num estado do mapa de calor. Buscado sob demanda (não vai junto
+    com /dashboard) porque só interessa quando alguém realmente clica."""
+    ids_permitidas = allowed_brand_ids(user, db)
+    if ids_permitidas is not None and brand_id not in ids_permitidas:
+        raise HTTPException(status_code=403, detail="Sem acesso a essa marca.")
+    cidades = (
+        db.query(MetaCidadeCache)
+        .filter(MetaCidadeCache.brand_id == brand_id, MetaCidadeCache.regiao == regiao)
+        .order_by(MetaCidadeCache.cidade)
+        .all()
+    )
+    return {"cidades": [c.cidade for c in cidades]}
+
+
+def _ad_account_da_marca(db: Session, user: User, brand_id: int) -> Brand:
+    ids_permitidas = allowed_brand_ids(user, db)
+    if ids_permitidas is not None and brand_id not in ids_permitidas:
+        raise HTTPException(status_code=403, detail="Sem acesso a essa marca.")
+    brand = db.query(Brand).filter(Brand.id == brand_id).first()
+    if not brand or not brand.ad_account:
+        raise HTTPException(status_code=404, detail="Marca sem conta de anúncio do Meta configurada.")
+    return brand
+
+
+@router.get("/campanhas")
+def listar_campanhas(brand_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Campanhas ativas dessa marca — alimenta o seletor do diagnóstico de campanha (ver
+    /campanhas/diagnostico). Buscado ao vivo, não fica em cache: só interessa quando alguém
+    abre o diagnóstico, não vale a pena sincronizar isso pra todas as marcas todo dia."""
+    brand = _ad_account_da_marca(db, user, brand_id)
+    if META_DEMO_MODE:
+        return {"campanhas": [], "modoDemo": True}
+    campanhas = meta_client.get_active_campaign_names(brand.ad_account.meta_account_id, brand.campaign_filter)
+    return {"campanhas": campanhas, "modoDemo": False}
+
+
+@router.get("/campanhas/diagnostico")
+def diagnostico_campanha(
+    brand_id: int, campanha: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+):
+    """Diagnóstico ao vivo de uma campanha específica: orçamento/público/fase de aprendizado
+    de cada conjunto, desempenho diário e ranking de anúncios. Ver app.meta_client.get_campaign_diagnostico."""
+    brand = _ad_account_da_marca(db, user, brand_id)
+    if META_DEMO_MODE:
+        raise HTTPException(status_code=400, detail="Diagnóstico de campanha não está disponível em modo demonstração.")
+    try:
+        return meta_client.get_campaign_diagnostico(brand.ad_account.meta_account_id, campanha)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
 
 
 @router.get("/dashboard/google")
@@ -315,7 +430,6 @@ def get_google_dashboard(user: User = Depends(get_current_user), db: Session = D
             {
                 "brandId": b.id,
                 "marca": b.nome,
-                "tier": b.tier,
                 "orcamentoDiario": cache.orcamento_diario if cache else 0,
                 "status": cache.status if cache else "",
                 "orcamentoMensal": b.google_orcamento_mensal,
@@ -391,7 +505,7 @@ def get_google_dashboard(user: User = Depends(get_current_user), db: Session = D
         last_sync = _iso_utc(latest_cache.atualizado_em if latest_cache else None)
 
     return {
-        "brands": [{"id": b.id, "nome": b.nome, "tier": b.tier, "analista": b.analista} for b in brands],
+        "brands": [{"id": b.id, "nome": b.nome, "analista": b.analista} for b in brands],
         "trafego": trafego,
         "orcamentos": orcamentos,
         "topKeywords": top_keywords,
@@ -466,7 +580,7 @@ def get_funil_dashboard(user: User = Depends(get_current_user), db: Session = De
         last_sync = latest.data.isoformat() if latest else None
 
     return {
-        "brands": [{"id": b.id, "nome": b.nome, "tier": b.tier, "analista": b.analista} for b in brands],
+        "brands": [{"id": b.id, "nome": b.nome, "analista": b.analista} for b in brands],
         "trafego": trafego,
         "noticias": noticias,
         "sacStats": sac_stats,

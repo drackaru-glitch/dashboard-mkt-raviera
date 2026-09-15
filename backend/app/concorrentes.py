@@ -11,12 +11,19 @@ from datetime import date
 from sqlalchemy.orm import Session
 
 from app.concorrentes_parser import parse_biblioteca
-from app.models import Concorrente, ConcorrenteAnuncio, ConcorrenteColeta
+from app.models import Concorrente, ConcorrenteAnuncio, ConcorrenteColeta, ModeloVeiculo
+
+
+def _modelos_conhecidos(db: Session) -> list[str]:
+    """Nomes puros dos modelos ativos, pra passar pro parser. Fica aqui (e não dentro do
+    parser) porque só quem tem sessão de banco sabe o que existe hoje — o parser continua sem
+    depender de banco nenhum, só de texto."""
+    return [m.modelo for m in db.query(ModeloVeiculo).filter(ModeloVeiculo.ativo.is_(True)).all()]
 
 
 def analisar(db: Session, texto: str) -> dict:
     """Lê o texto colado e devolve o que foi encontrado, sem gravar nada."""
-    anuncios = parse_biblioteca(texto)
+    anuncios = parse_biblioteca(texto, modelos=_modelos_conhecidos(db))
     registrados = {c.pagina: c for c in db.query(Concorrente).all()}
 
     por_pagina: dict[str, int] = {}
@@ -40,7 +47,7 @@ def analisar(db: Session, texto: str) -> dict:
 def importar(db: Session, texto: str, paginas: list[str] | None = None) -> dict:
     """Grava os anúncios das páginas escolhidas (ou de todas as já cadastradas, se `paginas`
     não vier). Devolve o resumo do que entrou, saiu e continua no ar."""
-    anuncios = parse_biblioteca(texto)
+    anuncios = parse_biblioteca(texto, modelos=_modelos_conhecidos(db))
     hoje = date.today()
 
     registrados = {c.pagina: c for c in db.query(Concorrente).all()}

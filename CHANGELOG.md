@@ -4,6 +4,54 @@ Registro de versões do projeto. Uma versão nova é criada a cada conjunto de a
 
 ---
 
+## 0.58 — 2026-09-15
+
+### Diagnóstico de campanha (Meta Ads)
+- Novo botão de lupa ao lado de cada marca na tabela de Saldo abre um diagnóstico sob demanda, buscado ao vivo no Meta (sem cache): estrutura dos conjuntos (orçamento, público, destino, fase de aprendizado), desempenho diário (gasto/leads/CPL/CTR/CPM/frequência/alcance) e ranking de anúncios da campanha escolhida.
+- Decisão: ao vivo e sob demanda, não sincronizado todo dia — é ferramenta de investigação pontual, não relatório de acompanhamento diário.
+
+### Correção crítica: filtro de campanha quebrado (BMW Auto Dourados / Motorrad Dourados)
+- `_brand_matches_campaign` comparava o nome da campanha como PREFIXO exato do "Filtro de campanha" — quando a convenção de nome das campanhas da Dourados mudou (deixou de começar com "BMW AUTO DDS"/"MOTORRAD DDS"), o filtro parou de bater com qualquer campanha ativa.
+- Efeito real: 46 dias (01/08 a 15/09) com investimento, leads, orçamento real, mapa de calor e criativos ZERADOS pras duas marcas, sem erro nenhum aparecer.
+- Corrigido: a regra agora é "contém o texto", não "começa com" (mesmo padrão já usado na exclusão com "!"). Filtro das duas marcas atualizado para acompanhar a nomenclatura padrão adotada ("BMW AUTO DOURADOS" / "BMW MOTORRAD DOURADOS"). Dados históricos re-sincronizados manualmente para recuperar os 46 dias.
+
+### Notificações novas
+- **Alta performance**: espelho "do bem" de queda de leads — avisa quando o CPL de ontem cai 50%+ em relação à média recente (mais lead por menos dinheiro), com piso de volume pra não disparar por sorte.
+- **Aprendizado travado**: conjunto ativo preso em fase de aprendizado do Meta (LEARNING/LEARNING_LIMITED) por mais de 7 dias sem sair — sinal de público/orçamento/criativo mal ajustado.
+- **Públicos sobrepostos**: dois ou mais conjuntos ativos da mesma marca com público e otimização idênticos, competindo pelo mesmo leilão — achou dois casos reais no primeiro teste (BMW Auto Campo Grande e BMW Motorrad). Reforçado também como aviso inline na tabela de Conjuntos do diagnóstico de campanha.
+- **Orçamento subutilizado**: orçamento configurado bem maior que o gasto real médio dos últimos 5 dias fechados — dinheiro configurado mas não sendo usado. Reforçado também como ícone na tabela de Saldo.
+- Todas com dedup por ciclo/dia pra não repetir a notificação enquanto a mesma condição persistir.
+
+### Layout do diagnóstico de campanha corrigido
+- Conflito de classes CSS (`whitespace-nowrap` e `whitespace-normal` na mesma célula) fazia nome de conjunto/anúncio longo vazar por cima das colunas vizinhas — pior ainda com lista grande de cidades. Corrigido nas tabelas de Conjuntos e Anúncios.
+
+### Notas de versão no sino
+- `NOTAS_VERSAO` (texto curto pro sino, separado do changelog técnico) passa a ser preenchido a cada versão — estava vazio desde sempre.
+
+### Easter egg
+- Konami code (↑ ↑ ↓ ↓ ← → ← → B A) em qualquer tela ativa o "Modo Turbo": carrinhos cruzando a tela, logo girando e mensagem, some sozinho em ~4.5s.
+
+---
+
+## 0.57 — 2026-09-11
+
+### Interpretador de concorrentes: preço único e modelos da Ford
+- Um concorrente novo (Recol Veículos, revenda Ford) importou 7 anúncios e nenhum reconheceu modelo, e 5 ficaram sem preço nenhum.
+- Causa: a lista de modelos só cobria Toyota + o que tinha aparecido no pátio de seminovos; e o interpretador de preço só entendia o par "de X por Y" — a Recol anuncia com preço único ("Territory por apenas R$ 199.900"), formato que nunca tinha aparecido.
+- Corrigido: F-150 e Territory entraram na lista (agora migrada pro banco, ver abaixo); e um novo `_preco_unico()` reconhece o preço sozinho quando não há par de desconto. Quando o texto cita dois preços, fica com o ÚLTIMO — o primeiro costuma ser só contexto ("entregava tudo que você procura por R$149.990, agora por apenas R$139.990").
+- Testado contra os 9 casos históricos da Kampai antes de mudar qualquer coisa: todos continuam corretos, dois até melhoraram.
+- Também limpo: rodapé da própria Biblioteca de Anúncios ("Status do sistema API...Privacidade Termos Cookies") que grudava no texto do último anúncio de uma coleta.
+
+### Lista de modelos saiu do código, foi pro banco
+- Até aqui, um concorrente de marca nova só ganhava suporte depois de já ter quebrado o parser — Toyota (Kampai), depois Jeep/Honda/Hyundai (pátio de seminovos), depois Ford inteira (Recol). Em vez de esperar o próximo furo, pesquisei o mercado brasileiro atual e populei a tabela nova `modelos_veiculo` com **139 modelos em 23 marcas** — as do grupo (Toyota, Jeep, Ram, Hyundai, Nissan, BMW, BYD) e os rivais diretos de cada uma.
+- O regex de cada modelo agora é gerado sozinho a partir do nome puro (`construir_padrao()`) — não precisa mais escrever expressão regular à mão pra cada modelo novo, só cadastrar a linha.
+- Bônus: vogal acentuada ou não agora casa igual ("Série" também reconhece "Serie").
+- Rodando a lista nova contra os 83 anúncios já salvos da Kampai, apareceram 3 modelos que passavam batido: **Hilux SW4** (virava só "Hilux" genérico), **HB20** (a Kampai também tem Hyundai seminovo no pátio) e **Etios** (citado junto com Yaris em anúncio de pós-venda).
+- Corrigido no caminho: quando dois modelos têm o mesmo tamanho de nome (Etios/Yaris, 5 letras), o desempate virava a ordem interna (não garantida) de um `set` do Python — rodar a mesma coleta duas vezes podia dar modelo diferente. Agora o desempate é fixo: vence quem aparece mais cedo no texto.
+- Script `backend/seed_modelos_veiculo.py` deixa fácil adicionar mais modelos sem mexer em código — edita a lista, roda de novo, é seguro repetir.
+
+---
+
 ## 0.56 — 2026-09-10
 
 ### Correção crítica: lead de conversa (WhatsApp/Messenger) zerando em campanha de Geração de Cadastro

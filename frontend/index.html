@@ -39,14 +39,29 @@
 
   /* Botão de período ativo (só no escuro, mesmo motivo do brilho acima). */
   .neon-ativo { box-shadow: 0 0 0 1px rgba(59,130,246,.45), 0 0 14px -4px rgba(59,130,246,.95); }
+
+  /* --- Easter egg: Konami code ("Modo Turbo") ------------------------------
+     ↑ ↑ ↓ ↓ ← → ← → B A em qualquer tela — carrinhos cruzando de um lado ao
+     outro, logo girando, mensagem que aparece e some sozinha em ~4.5s. */
+  @keyframes turboFly { from { transform: translateX(-10vw) rotate(-6deg); } to { transform: translateX(110vw) rotate(6deg); } }
+  .turbo-carro { position: absolute; left: 0; animation-name: turboFly; animation-timing-function: linear; animation-fill-mode: forwards; }
+  @keyframes turboSpin { from { transform: rotate(0deg) scale(1); } 50% { transform: rotate(360deg) scale(1.15); } to { transform: rotate(720deg) scale(1); } }
+  .turbo-logo { animation: turboSpin 1.4s ease-in-out; }
+  @keyframes turboBannerIn {
+    0% { opacity: 0; transform: scale(0.85); }
+    12% { opacity: 1; transform: scale(1); }
+    88% { opacity: 1; transform: scale(1); }
+    100% { opacity: 0; transform: scale(0.95); }
+  }
+  .turbo-banner { animation: turboBannerIn 4.5s cubic-bezier(0.16, 1, 0.3, 1) both; }
 </style>
 </head>
 <body>
 <div id="root"></div>
 
 <script type="text/babel" data-presets="react">
-const { useState, useMemo, useEffect, useRef } = React;
-const APP_VERSION = "0.56";
+const { useState, useMemo, useEffect, useRef, useCallback } = React;
+const APP_VERSION = "0.58";
 
 /* ================================================================== */
 /* 1) CLIENTE DA API (backend próprio, substitui o Apps Script)         */
@@ -208,6 +223,12 @@ const IconSparkle = (p) => <Icon {...p} path={<path d="M12 3l1.8 5.2L19 10l-5.2 
 const IconSend = (p) => <Icon {...p} path={<><line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" /></>} />;
 const IconMessage = (p) => <Icon {...p} path={<path d="M21 11.5a8.38 8.38 0 01-.9 3.8 8.5 8.5 0 01-7.6 4.7 8.38 8.38 0 01-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 01-.9-3.8 8.5 8.5 0 014.7-7.6 8.38 8.38 0 013.8-.9h.5a8.48 8.48 0 018 8v.5z" />} />;
 const IconClock = (p) => <Icon {...p} path={<><circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" /></>} />;
+const IconGripVertical = (p) => <Icon {...p} path={<>
+  <circle cx="9" cy="5" r="1.3" fill="currentColor" /><circle cx="9" cy="12" r="1.3" fill="currentColor" /><circle cx="9" cy="19" r="1.3" fill="currentColor" />
+  <circle cx="15" cy="5" r="1.3" fill="currentColor" /><circle cx="15" cy="12" r="1.3" fill="currentColor" /><circle cx="15" cy="19" r="1.3" fill="currentColor" />
+</>} />;
+const IconBell = (p) => <Icon {...p} path={<><path d="M18 8a6 6 0 00-12 0c0 7-3 9-3 9h18s-3-2-3-9" /><path d="M13.73 21a2 2 0 01-3.46 0" /></>} />;
+const IconSearch = (p) => <Icon {...p} path={<><circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" /></>} />;
 
 /* ================================================================== */
 /* 4) GRÁFICOS EM SVG NATIVO COM TOOLTIP INTERATIVO                     */
@@ -908,6 +929,75 @@ function WelcomeOverlay({ show, nome, dark }) {
   );
 }
 
+// Easter egg pedido pelo Felipe (15/09/2026): sequência clássica do Konami code funcionando em
+// qualquer tela do sistema (não só uma), por isso vive aqui e é usado no componente raiz
+// (RavieraDashboard), não numa tela específica.
+const KONAMI_SEQUENCIA = ["ArrowUp", "ArrowUp", "ArrowDown", "ArrowDown", "ArrowLeft", "ArrowRight", "ArrowLeft", "ArrowRight", "b", "a"];
+
+function useKonamiCode(onTrigger) {
+  useEffect(() => {
+    let progresso = 0;
+    function aoTeclar(e) {
+      // Teclas de uma letra só (b/a) vêm maiúsculas com Caps Lock ligado — normaliza; as de
+      // seta (ArrowUp etc.) já são um nome fixo, não precisam disso.
+      const tecla = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+      if (tecla === KONAMI_SEQUENCIA[progresso]) {
+        progresso += 1;
+        if (progresso === KONAMI_SEQUENCIA.length) {
+          progresso = 0;
+          onTrigger();
+        }
+      } else {
+        // Não zera direto pra "primeira tecla errada de novo já conta como o primeiro passo"
+        // funcionar (ex.: ↑ ↑ ↑ ↓ ↓... continua reconhecendo a partir do segundo ↑).
+        progresso = tecla === KONAMI_SEQUENCIA[0] ? 1 : 0;
+      }
+    }
+    window.addEventListener("keydown", aoTeclar);
+    return () => window.removeEventListener("keydown", aoTeclar);
+  }, [onTrigger]);
+}
+
+function ModoTurboOverlay({ show, dark, onDone }) {
+  useEffect(() => {
+    if (!show) return;
+    const t = setTimeout(onDone, 4500);
+    return () => clearTimeout(t);
+  }, [show]);
+
+  // Só gera a lista de carrinhos (posição/velocidade aleatória) quando ativa — recalcula toda
+  // vez que dispara de novo, pra não repetir sempre a mesma coreografia.
+  const carros = useMemo(() => {
+    if (!show) return [];
+    return Array.from({ length: 18 }, (_, i) => ({
+      id: i,
+      top: Math.random() * 90,
+      duracao: 1.6 + Math.random() * 1.4,
+      atraso: Math.random() * 1.3,
+      tamanho: 22 + Math.random() * 22,
+    }));
+  }, [show]);
+
+  if (!show) return null;
+  return (
+    <div className="fixed inset-0 z-[300] overflow-hidden pointer-events-none flex items-center justify-center">
+      {carros.map((c) => (
+        <span key={c.id} className="turbo-carro" role="presentation"
+          style={{ top: c.top + "%", fontSize: c.tamanho, animationDuration: c.duracao + "s", animationDelay: c.atraso + "s" }}>
+          🏎️
+        </span>
+      ))}
+      <div className={"turbo-banner flex flex-col items-center gap-2 px-8 py-6 rounded-2xl border shadow-xl text-center " +
+        (dark ? "bg-neutral-900/95 border-neutral-700" : "bg-white/95 border-neutral-200")}>
+        <img src={dark ? "/static/assets/logo-escuro.png" : "/static/assets/logo-claro.png"} alt=""
+          className="turbo-logo h-12 w-auto object-contain" />
+        <p className={"text-lg font-bold " + (dark ? "text-neutral-50" : "text-neutral-900")}>🏁 Modo turbo ativado!</p>
+        <p className={"text-sm " + (dark ? "text-neutral-400" : "text-neutral-500")}>60 anos de estrada, Grupo Raviera 🏎️💨</p>
+      </div>
+    </div>
+  );
+}
+
 function ToastStack({ toasts, dark }) {
   if (!toasts.length) return null;
   return (
@@ -1001,27 +1091,72 @@ function AdminPanel({ token, dark, cardBg, mutedText, pushToast }) {
   const [newAccount, setNewAccount] = useState({ meta_account_id: "", nome: "" });
   const [newIgAccount, setNewIgAccount] = useState({ instagram_business_id: "", username: "", nome: "", access_token: "" });
   const [newGoogleAccount, setNewGoogleAccount] = useState({ customer_id: "", nome: "" });
-  const [newBrand, setNewBrand] = useState({ nome: "", tier: "", ad_account_id: "", campaign_filter: "", diario_esperado_meta: 0, analista: "", instagram_account_id: "", google_ads_account_id: "", google_orcamento_mensal: 0 });
+  const [newBrand, setNewBrand] = useState({ nome: "", ad_account_id: "", campaign_filter: "", diario_esperado_meta: 0, analista: "", instagram_account_id: "", google_ads_account_id: "", google_orcamento_mensal: 0 });
   const [newUser, setNewUser] = useState({ nome: "", email: "", password: "", role: "gerente", brand_ids: [], ver_saldo: true, ver_investimento: true, ver_funil: true, ver_noticias: true });
 
   const inputCls = "px-2 py-1.5 rounded-md border text-xs " + (dark ? "bg-neutral-800 border-neutral-700 text-neutral-100" : "bg-white border-neutral-200 text-neutral-900");
+  // Lixeira das tabelas: peso visual de ação destrutiva (fundo vermelho suave só no hover), em
+  // vez de um ícone solto na célula sem nenhum aviso visual antes do confirm() do navegador.
+  const deleteBtnCls = "p-1.5 rounded-md transition-colors " + (dark ? "text-red-400 hover:bg-red-500/10" : "text-red-500 hover:bg-red-50");
+  const searchCls = "px-2 py-1.5 rounded-md border text-xs w-52 " + (dark ? "bg-neutral-800 border-neutral-700 text-neutral-100 placeholder:text-neutral-500" : "bg-white border-neutral-200 text-neutral-900 placeholder:text-neutral-400");
+
+  // Aba ativa: cada seção some é uma tela por si só, em vez de tudo empilhado numa rolagem
+  // só — a tela de Configuração já tinha 5 tabelas grandes uma embaixo da outra.
+  const [abaAtiva, setAbaAtiva] = useState("meta");
+  const ABAS = [
+    { id: "meta", label: "Contas Meta", total: accounts.length },
+    { id: "instagram", label: "Instagram", total: igAccounts.length },
+    { id: "google", label: "Google Ads", total: googleAccounts.length },
+    { id: "marcas", label: "Marcas", total: brands.length },
+    { id: "usuarios", label: "Usuários", total: users.length },
+  ];
+
+  // Busca por tabela — não filtra os <select> de "adicionar", só as tabelas de listagem.
+  const [buscaContas, setBuscaContas] = useState("");
+  const [buscaIg, setBuscaIg] = useState("");
+  const [buscaGoogle, setBuscaGoogle] = useState("");
+  const [buscaMarcas, setBuscaMarcas] = useState("");
+  const [buscaUsuarios, setBuscaUsuarios] = useState("");
+  const combina = (busca, ...campos) => campos.join(" ").toLowerCase().includes(busca.trim().toLowerCase());
+  const contasFiltradas = accounts.filter((a) => combina(buscaContas, a.nome, a.meta_account_id));
+  const igFiltradas = igAccounts.filter((a) => combina(buscaIg, a.nome, a.username, a.instagram_business_id));
+  const googleFiltradas = googleAccounts.filter((a) => combina(buscaGoogle, a.nome, a.customer_id));
+  const marcasFiltradas = brands.filter((b) => combina(buscaMarcas, b.nome, b.analista));
+  const usuariosFiltrados = users.filter((u) => combina(buscaUsuarios, u.nome, u.email));
 
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-wrap gap-2">
+        {ABAS.map((aba) => (
+          <button key={aba.id} onClick={() => setAbaAtiva(aba.id)}
+            className={"px-3 py-1.5 rounded-md text-xs font-semibold transition-colors " +
+              (abaAtiva === aba.id ? "bg-blue-600 text-white" : (dark ? "bg-neutral-900 border border-neutral-800 text-neutral-300 hover:bg-neutral-800" : "bg-white border border-neutral-200 text-neutral-600 hover:bg-neutral-100"))}>
+            {aba.label} <span className={abaAtiva === aba.id ? "opacity-75" : mutedText}>({aba.total})</span>
+          </button>
+        ))}
+      </div>
+
+      {abaAtiva === "meta" && (
       <div className={"rounded-xl border p-4 " + cardBg}>
-        <h2 className="text-sm font-bold mb-3">Contas de Anúncio (Meta)</h2>
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+          <h2 className="text-sm font-bold">Contas de Anúncio (Meta)</h2>
+          <input placeholder="Buscar por nome ou ID..." className={searchCls} value={buscaContas} onChange={(e) => setBuscaContas(e.target.value)} />
+        </div>
         <table className="w-full text-sm mb-3">
           <thead><tr className={"text-left text-xs uppercase " + mutedText}><th className="pb-2">ID Meta</th><th className="pb-2">Nome</th><th className="pb-2"></th></tr></thead>
           <tbody className={"divide-y " + (dark ? "divide-neutral-800" : "divide-neutral-100")}>
-            {accounts.map((a) => (
+            {contasFiltradas.map((a) => (
               <tr key={a.id}>
                 <td className="py-1.5">{a.meta_account_id}</td>
                 <td className="py-1.5">{a.nome}</td>
                 <td className="py-1.5 text-right">
-                  <button onClick={() => askConfirm(`Excluir a conta "${a.nome}"?`, () => withErrorHandling(() => authJson(`/admin/ad-accounts/${a.id}`, token, { method: "DELETE" })))} className="text-red-500"><IconTrash className="h-3.5 w-3.5" /></button>
+                  <button onClick={() => askConfirm(`Excluir a conta "${a.nome}"?`, () => withErrorHandling(() => authJson(`/admin/ad-accounts/${a.id}`, token, { method: "DELETE" })))} className={deleteBtnCls} title="Excluir conta" aria-label="Excluir conta"><IconTrash className="h-3.5 w-3.5" /></button>
                 </td>
               </tr>
             ))}
+            {contasFiltradas.length === 0 && (
+              <tr><td colSpan="3" className={"py-4 text-center text-xs " + mutedText}>Nenhuma conta encontrada pra "{buscaContas}".</td></tr>
+            )}
           </tbody>
         </table>
         <div className="flex flex-wrap gap-2 items-end">
@@ -1031,23 +1166,31 @@ function AdminPanel({ token, dark, cardBg, mutedText, pushToast }) {
             className="px-3 py-1.5 rounded-md text-xs font-semibold bg-blue-600 text-white">Adicionar conta</button>
         </div>
       </div>
+      )}
 
+      {abaAtiva === "instagram" && (
       <div className={"rounded-xl border p-4 " + cardBg}>
-        <h2 className="text-sm font-bold mb-1">Contas do Instagram</h2>
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
+          <h2 className="text-sm font-bold">Contas do Instagram</h2>
+          <input placeholder="Buscar por nome, @ ou ID..." className={searchCls} value={buscaIg} onChange={(e) => setBuscaIg(e.target.value)} />
+        </div>
         <p className={"text-xs mb-3 " + mutedText}>Usadas para medir o alcance orgânico (posts e seguidores). O ID é o "instagram_business_id" da conta na Graph API.</p>
         <table className="w-full text-sm mb-3">
           <thead><tr className={"text-left text-xs uppercase " + mutedText}><th className="pb-2">ID Instagram</th><th className="pb-2">Usuário</th><th className="pb-2">Nome</th><th className="pb-2"></th></tr></thead>
           <tbody className={"divide-y " + (dark ? "divide-neutral-800" : "divide-neutral-100")}>
-            {igAccounts.map((a) => (
+            {igFiltradas.map((a) => (
               <tr key={a.id}>
                 <td className="py-1.5">{a.instagram_business_id}</td>
                 <td className="py-1.5">@{a.username}</td>
                 <td className="py-1.5">{a.nome}</td>
                 <td className="py-1.5 text-right">
-                  <button onClick={() => askConfirm(`Excluir a conta do Instagram "${a.nome}"?`, () => withErrorHandling(() => authJson(`/admin/instagram-accounts/${a.id}`, token, { method: "DELETE" })))} className="text-red-500"><IconTrash className="h-3.5 w-3.5" /></button>
+                  <button onClick={() => askConfirm(`Excluir a conta do Instagram "${a.nome}"?`, () => withErrorHandling(() => authJson(`/admin/instagram-accounts/${a.id}`, token, { method: "DELETE" })))} className={deleteBtnCls} title="Excluir conta" aria-label="Excluir conta"><IconTrash className="h-3.5 w-3.5" /></button>
                 </td>
               </tr>
             ))}
+            {igFiltradas.length === 0 && (
+              <tr><td colSpan="4" className={"py-4 text-center text-xs " + mutedText}>Nenhuma conta encontrada pra "{buscaIg}".</td></tr>
+            )}
           </tbody>
         </table>
         <div className="flex flex-wrap gap-2 items-end">
@@ -1059,22 +1202,30 @@ function AdminPanel({ token, dark, cardBg, mutedText, pushToast }) {
             className="px-3 py-1.5 rounded-md text-xs font-semibold bg-blue-600 text-white">Adicionar conta</button>
         </div>
       </div>
+      )}
 
+      {abaAtiva === "google" && (
       <div className={"rounded-xl border p-4 " + cardBg}>
-        <h2 className="text-sm font-bold mb-1">Contas do Google Ads</h2>
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
+          <h2 className="text-sm font-bold">Contas do Google Ads</h2>
+          <input placeholder="Buscar por nome ou Customer ID..." className={searchCls} value={buscaGoogle} onChange={(e) => setBuscaGoogle(e.target.value)} />
+        </div>
         <p className={"text-xs mb-3 " + mutedText}>Customer ID de cada conta do Google Ads (só números, sem hífen).</p>
         <table className="w-full text-sm mb-3">
           <thead><tr className={"text-left text-xs uppercase " + mutedText}><th className="pb-2">Customer ID</th><th className="pb-2">Nome</th><th className="pb-2"></th></tr></thead>
           <tbody className={"divide-y " + (dark ? "divide-neutral-800" : "divide-neutral-100")}>
-            {googleAccounts.map((a) => (
+            {googleFiltradas.map((a) => (
               <tr key={a.id}>
                 <td className="py-1.5">{a.customer_id}</td>
                 <td className="py-1.5">{a.nome}</td>
                 <td className="py-1.5 text-right">
-                  <button onClick={() => askConfirm(`Excluir a conta do Google Ads "${a.nome}"?`, () => withErrorHandling(() => authJson(`/admin/google-ads-accounts/${a.id}`, token, { method: "DELETE" })))} className="text-red-500"><IconTrash className="h-3.5 w-3.5" /></button>
+                  <button onClick={() => askConfirm(`Excluir a conta do Google Ads "${a.nome}"?`, () => withErrorHandling(() => authJson(`/admin/google-ads-accounts/${a.id}`, token, { method: "DELETE" })))} className={deleteBtnCls} title="Excluir conta" aria-label="Excluir conta"><IconTrash className="h-3.5 w-3.5" /></button>
                 </td>
               </tr>
             ))}
+            {googleFiltradas.length === 0 && (
+              <tr><td colSpan="3" className={"py-4 text-center text-xs " + mutedText}>Nenhuma conta encontrada pra "{buscaGoogle}".</td></tr>
+            )}
           </tbody>
         </table>
         <div className="flex flex-wrap gap-2 items-end">
@@ -1084,42 +1235,49 @@ function AdminPanel({ token, dark, cardBg, mutedText, pushToast }) {
             className="px-3 py-1.5 rounded-md text-xs font-semibold bg-blue-600 text-white">Adicionar conta</button>
         </div>
       </div>
+      )}
 
+      {abaAtiva === "marcas" && (
       <div className={"rounded-xl border p-4 " + cardBg}>
-        <h2 className="text-sm font-bold mb-1">Marcas</h2>
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
+          <h2 className="text-sm font-bold">Marcas</h2>
+          <input placeholder="Buscar por marca ou analista..." className={searchCls} value={buscaMarcas} onChange={(e) => setBuscaMarcas(e.target.value)} />
+        </div>
         <p className={"text-xs mb-3 " + mutedText}>Se várias marcas dividem a mesma conta, use "Filtro de campanha" com o prefixo do nome das campanhas de cada marca no Meta.</p>
         <table className="w-full text-sm mb-3 min-w-[640px]">
           <thead><tr className={"text-left text-xs uppercase " + mutedText}>
-            <th className="pb-2">Marca</th><th className="pb-2">Tier</th><th className="pb-2">Conta</th><th className="pb-2">Filtro campanha</th><th className="pb-2">Diário esperado</th><th className="pb-2">Analista</th><th className="pb-2">Instagram</th><th className="pb-2">Google Ads</th><th className="pb-2">Orç. mensal Google</th><th className="pb-2"></th>
+            <th className="pb-2">Marca</th><th className="pb-2">Conta</th><th className="pb-2">Filtro campanha</th><th className="pb-2">Orç. planejado</th><th className="pb-2">Orç. real (Meta)</th><th className="pb-2">Analista</th><th className="pb-2">Instagram</th><th className="pb-2">Google Ads</th><th className="pb-2">Orç. mensal Google</th><th className="pb-2"></th>
           </tr></thead>
           <tbody className={"divide-y " + (dark ? "divide-neutral-800" : "divide-neutral-100")}>
-            {brands.map((b) => (
+            {marcasFiltradas.map((b) => (
               <tr key={b.id}>
                 <td className="py-1.5 font-semibold">{b.nome}</td>
-                <td className="py-1.5">{b.tier}</td>
                 <td className="py-1.5">{(accounts.find((a) => a.id === b.ad_account_id) || {}).nome || "—"}</td>
                 <td className="py-1.5">{b.campaign_filter || "—"}</td>
                 <td className="py-1.5">{fmtBRL(b.diario_esperado_meta)}</td>
+                <td className="py-1.5">{b.orcamento_diario_real == null ? "—" : fmtBRL(b.orcamento_diario_real)}</td>
                 <td className="py-1.5">{b.analista || "—"}</td>
                 <td className="py-1.5">{(igAccounts.find((a) => a.id === b.instagram_account_id) || {}).username ? "@" + igAccounts.find((a) => a.id === b.instagram_account_id).username : "—"}</td>
                 <td className="py-1.5">{(googleAccounts.find((a) => a.id === b.google_ads_account_id) || {}).customer_id || "—"}</td>
                 <td className="py-1.5">{fmtBRL(b.google_orcamento_mensal)}</td>
                 <td className="py-1.5 text-right">
-                  <button onClick={() => askConfirm(`Excluir a marca "${b.nome}"? Todo o histórico de tráfego e criativos dessa marca será perdido.`, () => withErrorHandling(() => authJson(`/admin/brands/${b.id}`, token, { method: "DELETE" })))} className="text-red-500"><IconTrash className="h-3.5 w-3.5" /></button>
+                  <button onClick={() => askConfirm(`Excluir a marca "${b.nome}"? Todo o histórico de tráfego e criativos dessa marca será perdido.`, () => withErrorHandling(() => authJson(`/admin/brands/${b.id}`, token, { method: "DELETE" })))} className={deleteBtnCls} title="Excluir marca" aria-label="Excluir marca"><IconTrash className="h-3.5 w-3.5" /></button>
                 </td>
               </tr>
             ))}
+            {marcasFiltradas.length === 0 && (
+              <tr><td colSpan="10" className={"py-4 text-center text-xs " + mutedText}>Nenhuma marca encontrada pra "{buscaMarcas}".</td></tr>
+            )}
           </tbody>
         </table>
         <div className="flex flex-wrap gap-2 items-end">
           <input placeholder="Nome da marca" className={inputCls} value={newBrand.nome} onChange={(e) => setNewBrand({ ...newBrand, nome: e.target.value })} />
-          <input placeholder="Tier" className={inputCls} value={newBrand.tier} onChange={(e) => setNewBrand({ ...newBrand, tier: e.target.value })} />
           <select className={inputCls} value={newBrand.ad_account_id} onChange={(e) => setNewBrand({ ...newBrand, ad_account_id: e.target.value })}>
             <option value="">Conta de anúncio...</option>
             {accounts.map((a) => <option key={a.id} value={a.id}>{a.nome}</option>)}
           </select>
           <input placeholder="Filtro de campanha (opcional)" className={inputCls} value={newBrand.campaign_filter} onChange={(e) => setNewBrand({ ...newBrand, campaign_filter: e.target.value })} />
-          <input type="number" placeholder="Diário esperado" className={inputCls} value={newBrand.diario_esperado_meta} onChange={(e) => setNewBrand({ ...newBrand, diario_esperado_meta: e.target.value })} />
+          <input type="number" placeholder="Orç. planejado/dia" className={inputCls} value={newBrand.diario_esperado_meta} onChange={(e) => setNewBrand({ ...newBrand, diario_esperado_meta: e.target.value })} />
           <input placeholder="Analista (ex: Felipe)" className={inputCls} value={newBrand.analista} onChange={(e) => setNewBrand({ ...newBrand, analista: e.target.value })} />
           <select className={inputCls} value={newBrand.instagram_account_id} onChange={(e) => setNewBrand({ ...newBrand, instagram_account_id: e.target.value })}>
             <option value="">Conta do Instagram (opcional)...</option>
@@ -1132,17 +1290,25 @@ function AdminPanel({ token, dark, cardBg, mutedText, pushToast }) {
           <input type="number" placeholder="Orçamento mensal Google" className={inputCls} value={newBrand.google_orcamento_mensal} onChange={(e) => setNewBrand({ ...newBrand, google_orcamento_mensal: e.target.value })} />
           <button onClick={() => withErrorHandling(async () => {
             await authJson("/admin/brands", token, { method: "POST", body: JSON.stringify({ ...newBrand, ad_account_id: newBrand.ad_account_id ? Number(newBrand.ad_account_id) : null, diario_esperado_meta: Number(newBrand.diario_esperado_meta) || 0, instagram_account_id: newBrand.instagram_account_id ? Number(newBrand.instagram_account_id) : null, google_ads_account_id: newBrand.google_ads_account_id ? Number(newBrand.google_ads_account_id) : null, google_orcamento_mensal: Number(newBrand.google_orcamento_mensal) || 0 }) });
-            setNewBrand({ nome: "", tier: "", ad_account_id: "", campaign_filter: "", diario_esperado_meta: 0, analista: "", instagram_account_id: "", google_ads_account_id: "", google_orcamento_mensal: 0 });
+            setNewBrand({ nome: "", ad_account_id: "", campaign_filter: "", diario_esperado_meta: 0, analista: "", instagram_account_id: "", google_ads_account_id: "", google_orcamento_mensal: 0 });
           })} className="px-3 py-1.5 rounded-md text-xs font-semibold bg-blue-600 text-white">Adicionar marca</button>
         </div>
       </div>
+      )}
 
+      {abaAtiva === "usuarios" && (
       <div className={"rounded-xl border p-4 " + cardBg}>
-        <h2 className="text-sm font-bold mb-3">Usuários</h2>
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+          <h2 className="text-sm font-bold">Usuários</h2>
+          <input placeholder="Buscar por nome ou e-mail..." className={searchCls} value={buscaUsuarios} onChange={(e) => setBuscaUsuarios(e.target.value)} />
+        </div>
         <table className="w-full text-sm mb-3 min-w-[640px]">
           <thead><tr className={"text-left text-xs uppercase " + mutedText}><th className="pb-2">Nome</th><th className="pb-2">E-mail</th><th className="pb-2">Papel</th><th className="pb-2">Marcas</th><th className="pb-2">O que pode ver</th><th className="pb-2"></th></tr></thead>
           <tbody className={"divide-y " + (dark ? "divide-neutral-800" : "divide-neutral-100")}>
-            {users.map((u) => (
+            {usuariosFiltrados.length === 0 && (
+              <tr><td colSpan="6" className={"py-4 text-center text-xs " + mutedText}>Nenhum usuário encontrado pra "{buscaUsuarios}".</td></tr>
+            )}
+            {usuariosFiltrados.map((u) => (
               <tr key={u.id}>
                 <td className="py-1.5 font-semibold">{u.nome || "—"}</td>
                 <td className="py-1.5">{u.email}</td>
@@ -1171,7 +1337,7 @@ function AdminPanel({ token, dark, cardBg, mutedText, pushToast }) {
                   )}
                 </td>
                 <td className="py-1.5 text-right">
-                  <button onClick={() => askConfirm(`Excluir o usuário "${u.email}"?`, () => withErrorHandling(() => authJson(`/admin/users/${u.id}`, token, { method: "DELETE" })))} className="text-red-500"><IconTrash className="h-3.5 w-3.5" /></button>
+                  <button onClick={() => askConfirm(`Excluir o usuário "${u.email}"?`, () => withErrorHandling(() => authJson(`/admin/users/${u.id}`, token, { method: "DELETE" })))} className={deleteBtnCls} title="Excluir usuário" aria-label="Excluir usuário"><IconTrash className="h-3.5 w-3.5" /></button>
                 </td>
               </tr>
             ))}
@@ -1225,6 +1391,7 @@ function AdminPanel({ token, dark, cardBg, mutedText, pushToast }) {
           })} className="self-start px-3 py-1.5 rounded-md text-xs font-semibold bg-blue-600 text-white">Adicionar usuário</button>
         </div>
       </div>
+      )}
 
       <ConfirmModal confirm={confirm} dark={dark} onCancel={() => setConfirm(null)} onConfirm={handleConfirm} />
     </div>
@@ -1287,6 +1454,333 @@ function LocationHeatmapBrandGroup({ item, dark, mutedText }) {
         {item.localidades.map((l) => (
           <LocationHeatRow key={l.cidade} loc={l} maxConversoes={maxConversoes} dark={dark} mutedText={mutedText} />
         ))}
+      </div>
+    </div>
+  );
+}
+
+function RegionHeatRow({ item, dark, mutedText, maxLeads, onAbrirCidades }) {
+  const intensidade = maxLeads > 0 ? item.leads / maxLeads : 0;
+  return (
+    <button onClick={() => onAbrirCidades(item.regiao)}
+      className={"relative w-full text-left rounded-lg overflow-hidden border transition-colors " +
+        (dark ? "border-neutral-800 hover:border-neutral-600" : "border-neutral-200 hover:border-neutral-400")}
+      title="Clique pra ver as cidades configuradas nesse estado">
+      <div className="absolute inset-y-0 left-0" style={{
+        width: (8 + intensidade * 92) + "%",
+        background: dark ? "rgba(96,165,250," + (0.1 + intensidade * 0.35).toFixed(2) + ")" : "rgba(37,99,235," + (0.06 + intensidade * 0.3).toFixed(2) + ")",
+      }} />
+      <div className="relative flex items-center justify-between gap-2 px-3 py-2 text-xs">
+        <span className="font-semibold truncate">{item.regiao}</span>
+        <span className={"shrink-0 " + mutedText}>{fmtNum(item.leads)} leads · {fmtBRL(item.gasto)}</span>
+      </div>
+    </button>
+  );
+}
+
+function RegionHeatmapBrandGroup({ item, dark, mutedText, onAbrirCidades }) {
+  // Cada marca pode ter de 1 a 8 estados — num grid de 3 colunas, mostrar todos direto deixa
+  // cada cartão com uma altura diferente e a grade inteira desalinhada. Por padrão só o
+  // estado principal aparece (mesma altura pra todo mundo); "+N estados" abre o resto.
+  const [expandido, setExpandido] = useState(false);
+  const regioesOrdenadas = [...item.regioes].sort((a, b) => b.leads - a.leads);
+  const [principal, ...restante] = regioesOrdenadas;
+  const maxLeads = Math.max(...regioesOrdenadas.map((r) => r.leads), 0.001);
+  const abrir = (regiao) => onAbrirCidades(item.brandId, item.marca, regiao);
+
+  return (
+    <div className={"rounded-lg border overflow-hidden " + (dark ? "border-neutral-800" : "border-neutral-200")}>
+      <button onClick={() => setExpandido((v) => !v)} disabled={restante.length === 0}
+        className={"w-full flex items-center justify-between gap-2 px-2.5 pt-2 pb-1 text-left " + (restante.length > 0 ? "cursor-pointer" : "cursor-default")}>
+        <span className={"text-[11px] font-semibold uppercase tracking-wide truncate " + mutedText}>{item.marca}</span>
+        {restante.length > 0 && (
+          <span className={"shrink-0 flex items-center gap-0.5 text-[11px] font-semibold " + (dark ? "text-neutral-400" : "text-neutral-500")}>
+            {expandido ? "ver menos" : `+${restante.length}`}
+            <IconChevronDown className={"h-3 w-3 transition-transform" + (expandido ? " rotate-180" : "")} />
+          </span>
+        )}
+      </button>
+      <div className="flex flex-col gap-1.5 p-1.5 pt-0.5">
+        <RegionHeatRow item={principal} dark={dark} mutedText={mutedText} maxLeads={maxLeads} onAbrirCidades={abrir} />
+        {expandido && restante.map((r) => (
+          <RegionHeatRow key={r.regiao} item={r} dark={dark} mutedText={mutedText} maxLeads={maxLeads} onAbrirCidades={abrir} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function CidadesConfiguradasModal({ info, onClose, dark, token }) {
+  const [cidades, setCidades] = useState(null);
+  const [erro, setErro] = useState(null);
+
+  useEffect(() => {
+    if (!info) return;
+    setCidades(null);
+    setErro(null);
+    authJson(`/api/cidades-configuradas?brand_id=${info.brandId}&regiao=${encodeURIComponent(info.regiao)}`, token)
+      .then((data) => setCidades(data.cidades))
+      .catch((e) => setErro(e.message));
+  }, [info]);
+
+  if (!info) return null;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4" onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()}
+        className={"w-full max-w-md max-h-[80vh] overflow-y-auto rounded-xl border p-5 flex flex-col gap-3 shadow-xl " + (dark ? "bg-neutral-900 border-neutral-800" : "bg-white border-neutral-200")}>
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <p className={"text-[11px] font-semibold uppercase tracking-wide " + (dark ? "text-neutral-400" : "text-neutral-500")}>{info.marca} · {info.regiao}</p>
+            <p className="text-sm font-bold leading-snug">Cidades configuradas</p>
+          </div>
+          <button onClick={onClose} className={(dark ? "text-neutral-400" : "text-neutral-500") + " shrink-0"}><IconX className="h-4 w-4" /></button>
+        </div>
+        <p className={"text-[11px] rounded-md px-2.5 py-2 " + (dark ? "bg-amber-500/10 text-amber-400" : "bg-amber-50 text-amber-700")}>
+          Isso é segmentação, não resultado: são as cidades que os conjuntos ATIVOS dessa marca estão configurados pra tentar alcançar nesse estado — não necessariamente de onde vieram os leads (esse dado real é o próprio mapa, por estado).
+        </p>
+        {erro && <p className="text-xs text-red-500">{erro}</p>}
+        {!erro && cidades === null && <p className={"text-xs " + (dark ? "text-neutral-500" : "text-neutral-400")}>Carregando...</p>}
+        {cidades && cidades.length === 0 && (
+          <p className={"text-xs " + (dark ? "text-neutral-500" : "text-neutral-400")}>Nenhuma cidade específica configurada — os conjuntos ativos miram o estado ou o país inteiro, sem recorte de cidade.</p>
+        )}
+        {cidades && cidades.length > 0 && (
+          <div className="flex flex-wrap gap-1.5">
+            {cidades.map((c) => (
+              <span key={c} className={"text-xs px-2 py-1 rounded-full border " + (dark ? "bg-neutral-800 border-neutral-700 text-neutral-200" : "bg-neutral-100 border-neutral-200 text-neutral-700")}>{c}</span>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+const FASE_APRENDIZADO_LABEL = {
+  LEARNING: "Em aprendizado",
+  LEARNING_LIMITED: "Aprendizado limitado",
+  ACTIVE: "Aprendizado concluído",
+};
+
+function StatusMetaBadge({ status, dark }) {
+  if (!status) return <span className={dark ? "text-neutral-500" : "text-neutral-400"}>—</span>;
+  const cls = status === "ACTIVE"
+    ? (dark ? "bg-emerald-500/10 text-emerald-400" : "bg-emerald-50 text-emerald-700")
+    : (dark ? "bg-neutral-800 text-neutral-400" : "bg-neutral-100 text-neutral-500");
+  return <span className={"text-[11px] font-semibold px-1.5 py-0.5 rounded " + cls}>{status}</span>;
+}
+
+function FaseAprendizadoBadge({ fase, dark }) {
+  if (!fase) return <span className={dark ? "text-neutral-500" : "text-neutral-400"}>—</span>;
+  const cores = {
+    LEARNING: dark ? "bg-amber-500/10 text-amber-400" : "bg-amber-50 text-amber-700",
+    LEARNING_LIMITED: dark ? "bg-red-500/10 text-red-400" : "bg-red-50 text-red-700",
+    ACTIVE: dark ? "bg-emerald-500/10 text-emerald-400" : "bg-emerald-50 text-emerald-700",
+  };
+  return (
+    <span className={"text-[11px] font-semibold px-1.5 py-0.5 rounded " + (cores[fase] || (dark ? "bg-neutral-800 text-neutral-400" : "bg-neutral-100 text-neutral-500"))}>
+      {FASE_APRENDIZADO_LABEL[fase] || fase}
+    </span>
+  );
+}
+
+// Diagnóstico de UMA campanha, buscado ao vivo no Meta (sem cache) — só interessa quando
+// alguém quer investigar uma campanha pontual, não vale sincronizar isso pra todas todo dia.
+function CampanhaDiagnosticoModal({ info, onClose, dark, token }) {
+  const [campanhas, setCampanhas] = useState(null);
+  const [campanhaEscolhida, setCampanhaEscolhida] = useState(null);
+  const [diagnostico, setDiagnostico] = useState(null);
+  const [erro, setErro] = useState(null);
+  const [modoDemo, setModoDemo] = useState(false);
+
+  useEffect(() => {
+    if (!info) return;
+    setCampanhas(null);
+    setCampanhaEscolhida(null);
+    setDiagnostico(null);
+    setErro(null);
+    setModoDemo(false);
+    authJson(`/api/campanhas?brand_id=${info.brandId}`, token)
+      .then((data) => {
+        setModoDemo(data.modoDemo);
+        setCampanhas(data.campanhas);
+        if (data.campanhas.length === 1) setCampanhaEscolhida(data.campanhas[0].nome);
+      })
+      .catch((e) => setErro(e.message));
+  }, [info]);
+
+  useEffect(() => {
+    if (!campanhaEscolhida) return;
+    setDiagnostico(null);
+    setErro(null);
+    authJson(`/api/campanhas/diagnostico?brand_id=${info.brandId}&campanha=${encodeURIComponent(campanhaEscolhida)}`, token)
+      .then(setDiagnostico)
+      .catch((e) => setErro(e.message));
+  }, [campanhaEscolhida]);
+
+  if (!info) return null;
+  const mutedCls = dark ? "text-neutral-400" : "text-neutral-500";
+  const cpl = diagnostico && diagnostico.totalLeads ? diagnostico.totalGasto / diagnostico.totalLeads : null;
+  const thCls = "text-left text-[11px] uppercase tracking-wide pb-1.5 pr-3 " + mutedCls;
+  const tdCls = "py-1 pr-3 whitespace-nowrap";
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4" onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()}
+        className={"w-full max-w-3xl max-h-[85vh] overflow-y-auto rounded-xl border p-5 flex flex-col gap-4 shadow-xl " + (dark ? "bg-neutral-900 border-neutral-800" : "bg-white border-neutral-200")}>
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <p className={"text-[11px] font-semibold uppercase tracking-wide " + mutedCls}>{info.marca}</p>
+            <p className="text-sm font-bold leading-snug">Diagnóstico de campanha</p>
+          </div>
+          <button onClick={onClose} className={mutedCls + " shrink-0"}><IconX className="h-4 w-4" /></button>
+        </div>
+
+        {erro && <p className="text-xs text-red-500">{erro}</p>}
+
+        {!erro && modoDemo && (
+          <p className={"text-xs " + mutedCls}>Diagnóstico não disponível em modo demonstração (sem token do Meta configurado).</p>
+        )}
+
+        {!erro && !modoDemo && campanhas === null && <p className={"text-xs " + mutedCls}>Carregando campanhas...</p>}
+
+        {!erro && campanhas && campanhas.length === 0 && (
+          <p className={"text-xs " + mutedCls}>Nenhuma campanha ativa encontrada pra essa marca agora.</p>
+        )}
+
+        {!erro && campanhas && campanhas.length > 1 && (
+          <div className="flex flex-col gap-1.5">
+            <p className={"text-[11px] font-semibold uppercase tracking-wide " + mutedCls}>Escolha a campanha</p>
+            <div className="flex flex-col gap-1">
+              {campanhas.map((c) => (
+                <button key={c.nome} onClick={() => setCampanhaEscolhida(c.nome)}
+                  className={"text-left text-xs px-2.5 py-1.5 rounded-md border transition-colors " +
+                    (c.nome === campanhaEscolhida
+                      ? (dark ? "bg-neutral-800 border-neutral-600 font-semibold" : "bg-neutral-100 border-neutral-400 font-semibold")
+                      : (dark ? "border-neutral-800 hover:bg-neutral-800" : "border-neutral-200 hover:bg-neutral-100"))}>
+                  {c.nome}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {!erro && campanhaEscolhida && diagnostico === null && <p className={"text-xs " + mutedCls}>Buscando dados no Meta...</p>}
+
+        {!erro && diagnostico && (
+          <>
+            <div className="flex flex-wrap gap-2">
+              <span className={"text-[11px] px-2 py-1 rounded-full border " + (dark ? "border-neutral-700 text-neutral-300" : "border-neutral-200 text-neutral-600")}>
+                {diagnostico.objetivo}
+              </span>
+              <span className={"text-[11px] px-2 py-1 rounded-full border " + (dark ? "border-neutral-700 text-neutral-300" : "border-neutral-200 text-neutral-600")}>
+                Orç. diário: {fmtBRL(diagnostico.orcamentoTotalDiario)}
+              </span>
+              <span className={"text-[11px] px-2 py-1 rounded-full border " + (dark ? "border-neutral-700 text-neutral-300" : "border-neutral-200 text-neutral-600")}>
+                Gasto no período: {fmtBRL(diagnostico.totalGasto)}
+              </span>
+              <span className={"text-[11px] px-2 py-1 rounded-full border " + (dark ? "border-neutral-700 text-neutral-300" : "border-neutral-200 text-neutral-600")}>
+                Leads: {fmtNum(diagnostico.totalLeads)}
+              </span>
+              <span className={"text-[11px] px-2 py-1 rounded-full border " + (dark ? "border-neutral-700 text-neutral-300" : "border-neutral-200 text-neutral-600")}>
+                CPL médio: {cpl == null ? "—" : fmtBRL(cpl)}
+              </span>
+            </div>
+
+            <div>
+              <p className={"text-[11px] font-semibold uppercase tracking-wide mb-1.5 " + mutedCls}>Conjuntos de anúncios</p>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead><tr>
+                    <th className={thCls}>Conjunto</th>
+                    <th className={thCls}>Status</th>
+                    <th className={thCls}>Orçamento</th>
+                    <th className={thCls}>Destino</th>
+                    <th className={thCls}>Cidades</th>
+                    <th className={thCls}>Aprendizado</th>
+                  </tr></thead>
+                  <tbody className={"divide-y " + (dark ? "divide-neutral-800" : "divide-neutral-100")}>
+                    {diagnostico.conjuntos.map((c) => (
+                      <tr key={c.nome}>
+                        <td className="py-1 pr-3 font-medium whitespace-normal break-words max-w-[220px]">
+                          {c.nome}
+                          {c.publicoSobrepostoCom && c.publicoSobrepostoCom.length > 0 && (
+                            <div className={"flex items-center gap-1 mt-0.5 font-normal text-[11px] " + (dark ? "text-indigo-400" : "text-indigo-600")}>
+                              <IconUsers className="h-3 w-3 shrink-0" />
+                              <span>Mesmo público que {c.publicoSobrepostoCom.map((n) => `"${n}"`).join(", ")}</span>
+                            </div>
+                          )}
+                        </td>
+                        <td className={tdCls}><StatusMetaBadge status={c.status} dark={dark} /></td>
+                        <td className={tdCls}>{fmtBRL(c.orcamentoDiario)}{c.orcamentoTipo === "cbo" ? " (CBO)" : ""}</td>
+                        <td className={tdCls}>{c.destino || "—"}</td>
+                        <td className="py-1 pr-3 whitespace-normal break-words max-w-[280px]">{c.cidadesAlvo.length ? c.cidadesAlvo.join(", ") : "—"}</td>
+                        <td className={tdCls}><FaseAprendizadoBadge fase={c.faseAprendizado} dark={dark} /></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div>
+              <p className={"text-[11px] font-semibold uppercase tracking-wide mb-1.5 " + mutedCls}>Desempenho diário</p>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead><tr>
+                    <th className={thCls}>Data</th>
+                    <th className={thCls}>Gasto</th>
+                    <th className={thCls}>Leads</th>
+                    <th className={thCls}>CPL</th>
+                    <th className={thCls}>CTR</th>
+                    <th className={thCls}>CPM</th>
+                    <th className={thCls}>Freq.</th>
+                    <th className={thCls}>Alcance</th>
+                  </tr></thead>
+                  <tbody className={"divide-y " + (dark ? "divide-neutral-800" : "divide-neutral-100")}>
+                    {diagnostico.diario.map((d) => (
+                      <tr key={d.data}>
+                        <td className={tdCls}>{new Date(d.data + "T12:00:00").toLocaleDateString("pt-BR")}</td>
+                        <td className={tdCls}>{fmtBRL(d.gasto)}</td>
+                        <td className={tdCls}>{fmtNum(d.leads)}</td>
+                        <td className={tdCls}>{d.leads ? fmtBRL(d.gasto / d.leads) : "—"}</td>
+                        <td className={tdCls}>{d.ctr.toFixed(2)}%</td>
+                        <td className={tdCls}>{fmtBRL(d.cpm)}</td>
+                        <td className={tdCls}>{d.frequencia.toFixed(2)}</td>
+                        <td className={tdCls}>{fmtNum(d.alcance)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div>
+              <p className={"text-[11px] font-semibold uppercase tracking-wide mb-1.5 " + mutedCls}>Anúncios (ordenado por gasto)</p>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead><tr>
+                    <th className={thCls}>Anúncio</th>
+                    <th className={thCls}>Status</th>
+                    <th className={thCls}>Gasto</th>
+                    <th className={thCls}>Leads</th>
+                    <th className={thCls}>CTR</th>
+                  </tr></thead>
+                  <tbody className={"divide-y " + (dark ? "divide-neutral-800" : "divide-neutral-100")}>
+                    {diagnostico.anuncios.map((a) => (
+                      <tr key={a.nome}>
+                        <td className="py-1 pr-3 font-medium whitespace-normal break-words max-w-[220px]">{a.nome}</td>
+                        <td className={tdCls}><StatusMetaBadge status={a.status} dark={dark} /></td>
+                        <td className={tdCls}>{fmtBRL(a.gasto)}</td>
+                        <td className={tdCls}>{fmtNum(a.leads)}</td>
+                        <td className={tdCls}>{a.ctr.toFixed(2)}%</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
@@ -1952,6 +2446,9 @@ function ConcorrenciaDashboard({ token, dark, cardBg, mutedText, pushToast, role
   const fmtData = (iso) => iso ? iso.split("-").reverse().slice(0, 2).join("/") : "—";
   const oferta = (a) => {
     if (a.precoDe && a.precoPor) return fmtBRL(a.precoDe) + " → " + fmtBRL(a.precoPor);
+    // Preço único, sem desconto anunciado (ex.: "Territory por apenas R$ 199.900") — comum em
+    // concessionária que não trabalha com "de/por", como a Recol (Ford).
+    if (a.precoPor) return fmtBRL(a.precoPor);
     if (a.bonus) return "Bônus " + fmtBRL(a.bonus);
     return "—";
   };
@@ -2673,6 +3170,153 @@ function ChatWidget({ dark }) {
 }
 
 /* ================================================================== */
+/* 7.5) QUADROS ARRASTÁVEIS — reordenação manual dos blocos do painel   */
+/* ================================================================== */
+
+// Ordem em que os quadros aparecem quando ninguém nunca arrastou nada, e também o que volta
+// se o valor salvo no localStorage estiver corrompido ou de uma versão antiga com menos ids.
+const BLOCOS_PADRAO = ["topCriativos", "organico", "noticias", "evolucao", "ranking", "mapaMeta", "saldo"];
+
+// A pega do arraste só fica "draggable" enquanto o botão de grip está pressionado — do
+// contrário, um clique em qualquer parte do quadro (um botão "Ver mais", uma célula da
+// tabela de saldo) dispararia um arraste nativo do navegador sem a pessoa querer.
+function DraggableBlock({ id, className, style, dark, isDragging, isOver, onDragStartId, onDragOverId, onDropId, onDragEndReset, children }) {
+  const [podeArrastar, setPodeArrastar] = useState(false);
+  return (
+    <div
+      draggable={podeArrastar}
+      onDragStart={(e) => { e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", id); onDragStartId(id); }}
+      onDragEnd={() => { setPodeArrastar(false); onDragEndReset(); }}
+      onDragOver={(e) => { e.preventDefault(); onDragOverId(id); }}
+      onDragLeave={() => onDragOverId(null)}
+      onDrop={(e) => { e.preventDefault(); onDropId(e.dataTransfer.getData("text/plain"), id); onDragEndReset(); }}
+      className={"relative " + className + (isDragging ? " opacity-40" : "") + (isOver ? (dark ? " ring-2 ring-blue-500" : " ring-2 ring-blue-400") : "")}
+      // Enquanto o botão de grip está pressionado, o navegador pode não reconhecer a tempo
+      // que é um arraste (ex.: mouse parado meio segundo antes de mover) — sem isto, esse
+      // instante vira seleção de texto acidental na tela inteira em vez de arrastar o quadro.
+      style={{ ...style, userSelect: podeArrastar ? "none" : undefined }}
+    >
+      <button
+        type="button"
+        onMouseDown={() => setPodeArrastar(true)}
+        onMouseUp={() => setPodeArrastar(false)}
+        onDragStart={(e) => e.stopPropagation()}
+        title="Arraste para reordenar os quadros"
+        aria-label="Arraste para reordenar este quadro"
+        className={"absolute top-3 right-3 h-6 w-6 flex items-center justify-center rounded cursor-grab active:cursor-grabbing z-10 select-none " +
+          (dark ? "text-neutral-600 hover:text-neutral-300 hover:bg-neutral-800" : "text-neutral-300 hover:text-neutral-500 hover:bg-neutral-100")}
+      >
+        <IconGripVertical className="h-4 w-4" />
+      </button>
+      {children}
+    </div>
+  );
+}
+
+/* ================================================================== */
+/* 7.6) SINO DE NOTIFICAÇÕES                                            */
+/* ================================================================== */
+
+const NOTIFICACAO_ESTILO = {
+  saldo_critico: { IconComp: IconAlertCircle, cor: "text-red-500" },
+  gasto_anomalo: { IconComp: IconAlertTriangle, cor: "text-amber-500" },
+  queda_leads: { IconComp: IconAlertTriangle, cor: "text-red-500" },
+  alta_performance: { IconComp: IconAward, cor: "text-emerald-500" },
+  aprendizado_travado: { IconComp: IconClock, cor: "text-amber-500" },
+  orcamento_zerado: { IconComp: IconAlertCircle, cor: "text-orange-500" },
+  token_saude: { IconComp: IconLock, cor: "text-purple-500" },
+  falha_sync: { IconComp: IconXCircle, cor: "text-neutral-500" },
+  versao: { IconComp: IconSparkle, cor: "text-blue-500" },
+  publico_sobreposto: { IconComp: IconUsers, cor: "text-indigo-500" },
+  orcamento_subutilizado: { IconComp: IconGauge, cor: "text-cyan-500" },
+};
+
+function tempoRelativo(iso) {
+  const min = Math.floor((Date.now() - new Date(iso).getTime()) / 60000);
+  if (min < 1) return "agora";
+  if (min < 60) return `há ${min}min`;
+  const h = Math.floor(min / 60);
+  if (h < 24) return `há ${h}h`;
+  return `há ${Math.floor(h / 24)}d`;
+}
+
+// Busca sozinho de tempos em tempos — diferente do resto do painel (que só recarrega quando a
+// pessoa clica em "Atualizar" ou troca de tela), um alerta de saldo crítico ou gasto fora da
+// curva precisa aparecer sem precisar disso.
+const NOTIFICACOES_INTERVALO_MS = 3 * 60 * 1000;
+
+function NotificationBell({ token, dark }) {
+  const [itens, setItens] = useState([]);
+  const [naoLidas, setNaoLidas] = useState(0);
+  const [aberto, setAberto] = useState(false);
+
+  async function buscar() {
+    try {
+      const data = await authJson("/api/notificacoes", token);
+      setItens(data.itens);
+      setNaoLidas(data.naoLidas);
+    } catch {} // o sino não deve derrubar o painel se essa chamada falhar
+  }
+
+  useEffect(() => {
+    buscar();
+    const id = setInterval(buscar, NOTIFICACOES_INTERVALO_MS);
+    return () => clearInterval(id);
+  }, []);
+
+  function alternar() {
+    setAberto((v) => {
+      const abrindo = !v;
+      if (abrindo && naoLidas > 0) {
+        setNaoLidas(0);
+        authJson("/api/notificacoes/marcar-lidas", token, { method: "POST" }).catch(() => {});
+      }
+      return abrindo;
+    });
+  }
+
+  return (
+    <div className="relative">
+      <button onClick={alternar}
+        className={"relative h-9 w-9 flex items-center justify-center rounded-lg border " + (dark ? "bg-neutral-900 border-neutral-800" : "bg-white border-neutral-200")}
+        aria-label="Notificações">
+        <IconBell className="h-4 w-4" />
+        {naoLidas > 0 && (
+          <span className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 rounded-full bg-red-500 text-white text-[10px] font-bold flex items-center justify-center leading-none">
+            {naoLidas > 9 ? "9+" : naoLidas}
+          </span>
+        )}
+      </button>
+      {aberto && (
+        <>
+          <div className="fixed inset-0 z-10" onClick={() => setAberto(false)} />
+          <div className={"absolute right-0 top-11 z-20 w-80 max-h-[420px] overflow-y-auto rounded-lg border shadow-xl " + (dark ? "bg-neutral-900 border-neutral-800" : "bg-white border-neutral-200")}>
+            <div className={"px-3 py-2 text-xs font-bold border-b sticky top-0 " + (dark ? "border-neutral-800 bg-neutral-900" : "border-neutral-200 bg-white")}>Notificações</div>
+            {itens.length === 0 ? (
+              <div className={"px-3 py-6 text-xs text-center " + (dark ? "text-neutral-500" : "text-neutral-400")}>Nenhuma notificação por aqui ainda.</div>
+            ) : (
+              itens.map((n) => {
+                const cfg = NOTIFICACAO_ESTILO[n.tipo] || NOTIFICACAO_ESTILO.versao;
+                return (
+                  <div key={n.id} className={"px-3 py-2.5 border-b last:border-0 flex gap-2 " + (dark ? "border-neutral-800" : "border-neutral-100")}>
+                    <cfg.IconComp className={"h-4 w-4 mt-0.5 shrink-0 " + cfg.cor} />
+                    <div className="min-w-0">
+                      <div className="text-xs font-semibold">{n.titulo}</div>
+                      <div className={"text-xs mt-0.5 " + (dark ? "text-neutral-400" : "text-neutral-600")}>{n.mensagem}</div>
+                      <div className={"text-[10px] mt-1 " + (dark ? "text-neutral-600" : "text-neutral-400")}>{tempoRelativo(n.criadoEm)}</div>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+/* ================================================================== */
 /* 8) DASHBOARD PRINCIPAL                                               */
 /* ================================================================== */
 
@@ -2685,6 +3329,8 @@ function RavieraDashboard({ token, role, email, nome, permissoes, justLoggedIn, 
   }, [justLoggedIn]);
   const [dark, setDark] = useState(() => localStorage.getItem("raviera_theme") !== "light");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [modoTurbo, setModoTurbo] = useState(false);
+  useKonamiCode(useCallback(() => setModoTurbo(true), []));
   const [view, setView] = useState("dashboard"); // "dashboard" (Meta) | "google" | "funil" | "redes" | "concorrencia" | "config"
   const [dashboardMenuOpen, setDashboardMenuOpen] = useState(false);
   const [marcaFiltro, setMarcaFiltro] = useState("todas");
@@ -2694,7 +3340,47 @@ function RavieraDashboard({ token, role, email, nome, permissoes, justLoggedIn, 
   const [customEnd, setCustomEnd] = useState("");
   const [sortConfig, setSortConfig] = useState({ key: "status", dir: "asc" });
 
-  const [dashboardData, setDashboardData] = useState({ brands: [], trafego: [], saldos: [], criativosDiarios: [], organico: [], noticias: [], meta: {} });
+  // Ordem dos quadros do painel principal — cada pessoa que usa o FEFO neste navegador pode
+  // arrastar os quadros pra montar o painel do jeito que faz mais sentido pra ela.
+  const [blocoOrdem, setBlocoOrdem] = useState(() => {
+    try {
+      const salvo = JSON.parse(localStorage.getItem("raviera_ordem_blocos") || "null");
+      if (Array.isArray(salvo) && BLOCOS_PADRAO.every((id) => salvo.includes(id)) && salvo.every((id) => BLOCOS_PADRAO.includes(id))) {
+        return salvo;
+      }
+    } catch {}
+    return BLOCOS_PADRAO;
+  });
+  useEffect(() => { localStorage.setItem("raviera_ordem_blocos", JSON.stringify(blocoOrdem)); }, [blocoOrdem]);
+  // A ordem salva no navegador (acima) é só pra não "piscar" a ordem padrão no primeiro
+  // instante — quem manda de verdade é a conta, guardada no servidor. Busca uma vez ao abrir
+  // o painel; assim, ao logar num computador novo (ou depois de limpar o navegador), a pessoa
+  // já vê do jeito que arrastou da última vez, sem precisar refazer.
+  useEffect(() => {
+    let cancelado = false;
+    authJson("/auth/me", token).then((me) => {
+      if (cancelado || !Array.isArray(me.ordemBlocos)) return;
+      const valido = BLOCOS_PADRAO.every((id) => me.ordemBlocos.includes(id)) && me.ordemBlocos.every((id) => BLOCOS_PADRAO.includes(id));
+      if (valido) setBlocoOrdem(me.ordemBlocos);
+    }).catch(() => {}); // sem conexão ou token expirado: fica com o que já tinha localmente
+    return () => { cancelado = true; };
+  }, []);
+  const [blocoArrastando, setBlocoArrastando] = useState(null);
+  const [blocoSobre, setBlocoSobre] = useState(null);
+  function moverBloco(origemId, destinoId) {
+    if (!origemId || origemId === destinoId) return;
+    const semOrigem = blocoOrdem.filter((id) => id !== origemId);
+    const idx = semOrigem.indexOf(destinoId);
+    if (idx === -1) return;
+    const nova = [...semOrigem];
+    nova.splice(idx, 0, origemId);
+    setBlocoOrdem(nova);
+    // Salva na conta pra valer em qualquer computador — se falhar (sem internet, etc.), a
+    // pessoa já vê o quadro no lugar certo agora e tenta salvar de novo no próximo arraste.
+    authJson("/auth/me/ordem-blocos", token, { method: "PUT", body: JSON.stringify({ ordem: nova }) }).catch(() => {});
+  }
+
+  const [dashboardData, setDashboardData] = useState({ brands: [], trafego: [], saldos: [], criativosDiarios: [], organico: [], noticias: [], mapaCalorMeta: [], meta: {} });
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [toasts, setToasts] = useState([]);
@@ -2780,13 +3466,27 @@ function RavieraDashboard({ token, role, email, nome, permissoes, justLoggedIn, 
 
   const linhasSaldo = useMemo(() => {
     return brandsToShow.map((marca) => {
+      const brandId = (dashboardData.brands.find((b) => b.nome === marca) || {}).id;
       const saldo = dashboardData.saldos.find((s) => s.marca === marca) || {};
       const trafRecs = filterByRange(dashboardData.trafego.filter((r) => r.marca === marca), range);
       const agg = aggregateTrafego(trafRecs);
       const saldoAtual = saldo.saldoAtualMeta || 0;
+      // Planejado: número digitado à mão na aba Marcas. Real: soma do daily_budget das
+      // campanhas ativas dessa marca, lido do Meta a cada sincronização — os dois podem
+      // divergir quando alguém reajusta orçamento direto na campanha e esquece de atualizar
+      // aqui (ou vice-versa). O runway usa o planejado, que é o ritmo que a pessoa decidiu.
       const diarioEsperado = saldo.diarioEsperadoMeta || 0;
+      const orcamentoReal = saldo.orcamentoDiarioReal;
+      // Mais de 10% de diferença entre o que foi planejado e o que está configurado agora no
+      // Meta é o suficiente pra valer a pena conferir — reajuste feito direto na campanha e
+      // esquecido de replicar aqui, ou o contrário.
+      const orcamentoDivergente = diarioEsperado > 0 && orcamentoReal != null && Math.abs(orcamentoReal - diarioEsperado) > diarioEsperado * 0.1;
       const diasRestantes = diarioEsperado > 0 ? saldoAtual / diarioEsperado : null;
-      return { marca, tier: saldo.tier || "—", gasto: agg.gasto, quantidade: agg.quantidade, cpl: agg.cpl, saldoAtual, diarioEsperado, diasRestantes, status: statusRunway(diasRestantes) };
+      return {
+        marca, brandId, gasto: agg.gasto, quantidade: agg.quantidade, cpl: agg.cpl, saldoAtual, diarioEsperado,
+        orcamentoReal, orcamentoDivergente, diasRestantes, status: statusRunway(diasRestantes),
+        gastoMedioRecente: saldo.gastoMedioRecente, orcamentoSubutilizado: saldo.orcamentoSubutilizado,
+      };
     });
   }, [brandsToShow, dashboardData.saldos, dashboardData.trafego, range]);
 
@@ -2801,6 +3501,7 @@ function RavieraDashboard({ token, role, email, nome, permissoes, justLoggedIn, 
       let av, bv;
       if (key === "status") { av = STATUS_ORDER[a.status]; bv = STATUS_ORDER[b.status]; }
       else if (key === "diasRestantes") { av = a.diasRestantes === null ? Infinity : a.diasRestantes; bv = b.diasRestantes === null ? Infinity : b.diasRestantes; }
+      else if (key === "orcamentoReal") { av = a.orcamentoReal ?? Infinity; bv = b.orcamentoReal ?? Infinity; }
       else { av = a[key]; bv = b[key]; }
       if (typeof av === "string") return av.localeCompare(bv) * mult;
       return (av - bv) * mult;
@@ -2811,8 +3512,9 @@ function RavieraDashboard({ token, role, email, nome, permissoes, justLoggedIn, 
   const totalsSaldo = useMemo(() => {
     const t = linhasSaldo.reduce((acc, r) => {
       acc.gasto += r.gasto; acc.quantidade += r.quantidade; acc.saldoAtual += r.saldoAtual; acc.diarioEsperado += r.diarioEsperado;
+      if (r.orcamentoReal != null) acc.orcamentoReal += r.orcamentoReal;
       return acc;
-    }, { gasto: 0, quantidade: 0, saldoAtual: 0, diarioEsperado: 0 });
+    }, { gasto: 0, quantidade: 0, saldoAtual: 0, diarioEsperado: 0, orcamentoReal: 0 });
     t.cpl = t.quantidade > 0 ? t.gasto / t.quantidade : 0;
     return t;
   }, [linhasSaldo]);
@@ -2861,10 +3563,17 @@ function RavieraDashboard({ token, role, email, nome, permissoes, justLoggedIn, 
     () => dashboardData.noticias.filter((n) => brandsToShow.includes(n.marca)),
     [dashboardData.noticias, brandsToShow]
   );
+  const mapaCalorMetaToShow = useMemo(
+    () => dashboardData.mapaCalorMeta.filter((m) => brandsToShow.includes(m.marca)),
+    [dashboardData.mapaCalorMeta, brandsToShow]
+  );
+  const [cidadesModalInfo, setCidadesModalInfo] = useState(null);
+  const [diagnosticoInfo, setDiagnosticoInfo] = useState(null);
   const [creativesExpanded, setCreativesExpanded] = useState(false);
   const [noticiasExpanded, setNoticiasExpanded] = useState(false);
   const [organicoExpanded, setOrganicoExpanded] = useState(false);
-  useEffect(() => { setCreativesExpanded(false); setNoticiasExpanded(false); setOrganicoExpanded(false); }, [brandsToShow]);
+  const [mapaExpanded, setMapaExpanded] = useState(false);
+  useEffect(() => { setCreativesExpanded(false); setNoticiasExpanded(false); setOrganicoExpanded(false); setMapaExpanded(false); }, [brandsToShow]);
   const CREATIVES_PREVIEW_COUNT = 3;
   const creativesToRender = creativesExpanded ? topCreativesToShow : topCreativesToShow.slice(0, CREATIVES_PREVIEW_COUNT);
   const hasMoreCreatives = topCreativesToShow.length > CREATIVES_PREVIEW_COUNT;
@@ -2876,6 +3585,9 @@ function RavieraDashboard({ token, role, email, nome, permissoes, justLoggedIn, 
   const NOTICIAS_PREVIEW_COUNT = 3;
   const noticiasToRender = noticiasExpanded ? noticiasToShow : noticiasToShow.slice(0, NOTICIAS_PREVIEW_COUNT);
   const hasMoreNoticias = noticiasToShow.length > NOTICIAS_PREVIEW_COUNT;
+  const MAPA_PREVIEW_COUNT = 4;
+  const mapaToRender = mapaExpanded ? mapaCalorMetaToShow : mapaCalorMetaToShow.slice(0, MAPA_PREVIEW_COUNT);
+  const hasMoreMapa = mapaCalorMetaToShow.length > MAPA_PREVIEW_COUNT;
 
   function handleSort(key) {
     setSortConfig((prev) => (prev.key === key ? { key, dir: prev.dir === "asc" ? "desc" : "asc" } : { key, dir: "asc" }));
@@ -2891,7 +3603,10 @@ function RavieraDashboard({ token, role, email, nome, permissoes, justLoggedIn, 
     <div className={"min-h-screen w-full " + bg + " " + text + " font-sans transition-colors"}>
       <ToastStack toasts={toasts} dark={dark} />
       <CreativeDetailModal creative={selectedCreative} onClose={() => setSelectedCreative(null)} dark={dark} />
+      <CidadesConfiguradasModal info={cidadesModalInfo} onClose={() => setCidadesModalInfo(null)} dark={dark} token={token} />
+      <CampanhaDiagnosticoModal info={diagnosticoInfo} onClose={() => setDiagnosticoInfo(null)} dark={dark} token={token} />
       <WelcomeOverlay show={showWelcome} nome={nome} dark={dark} />
+      <ModoTurboOverlay show={modoTurbo} dark={dark} onDone={() => setModoTurbo(false)} />
       <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 flex flex-col gap-6">
         <header className="flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-center gap-3 cursor-pointer" title="Voltar para a tela principal"
@@ -2941,6 +3656,7 @@ function RavieraDashboard({ token, role, email, nome, permissoes, justLoggedIn, 
                 </>
               )}
             </div>
+            <NotificationBell token={token} dark={dark} />
             <button onClick={() => setSettingsOpen((v) => !v)} className={"h-9 w-9 flex items-center justify-center rounded-lg border " + (dark ? "bg-neutral-900 border-neutral-800" : "bg-white border-neutral-200")} aria-label="Configurações">
               <IconSettings className="h-4 w-4" />
             </button>
@@ -3047,143 +3763,248 @@ function RavieraDashboard({ token, role, email, nome, permissoes, justLoggedIn, 
               )}
             </div>
 
-            {topCreativesToShow.length > 0 && (
-              <div className={"neon-top rounded-xl border p-4 " + (dark ? "is-dark " : "") + cardBg} style={{ "--neon": "#f59e0b" }}>
-                <h2 className="text-sm font-bold mb-1 flex items-center gap-1.5"><IconAward className="h-4 w-4 text-amber-500" /> Top 3 Melhores Anúncios por Marca</h2>
-                <p className={"text-xs mb-3 " + mutedText}>Os 3 criativos com melhor performance de cada marca no período selecionado acima — investimento, leads e custo por lead</p>
-                <div className="flex flex-col gap-4">
-                  {creativesToRender.map((item) => (
-                    <TopCreativesBrandGroup key={item.brandId} item={item} dark={dark} cardBg={cardBg} mutedText={mutedText} onSelectCreative={setSelectedCreative} />
-                  ))}
-                </div>
-                {hasMoreCreatives && (
-                  <button onClick={() => setCreativesExpanded((v) => !v)}
-                    className={"mt-4 w-full flex items-center justify-center gap-1.5 py-2 rounded-md text-xs font-semibold border transition-colors " +
-                      (dark ? "bg-neutral-800 border-neutral-700 text-neutral-200 hover:bg-neutral-700" : "bg-neutral-100 border-neutral-200 text-neutral-700 hover:bg-neutral-200")}>
-                    {creativesExpanded ? "Ver menos" : "Ver todas (" + topCreativesToShow.length + ")"}
-                    <IconChevronDown className={"h-3.5 w-3.5 transition-transform" + (creativesExpanded ? " rotate-180" : "")} />
-                  </button>
-                )}
-              </div>
-            )}
+            {(() => {
+              // Cada quadro reordenável do painel principal, descrito uma vez só: se aparece
+              // (mesmas condições de antes) e o miolo dele (mesmo JSX de antes, só que sem a
+              // <div> externa — quem desenha essa div agora é o DraggableBlock).
+              const blocosDef = {
+                topCriativos: {
+                  show: topCreativesToShow.length > 0,
+                  className: "neon-top rounded-xl border p-4 " + (dark ? "is-dark " : "") + cardBg,
+                  style: { "--neon": "#f59e0b" },
+                  content: (
+                    <>
+                      <h2 className="text-sm font-bold mb-1 pr-8 flex items-center gap-1.5"><IconAward className="h-4 w-4 text-amber-500" /> Top 3 Melhores Anúncios por Marca</h2>
+                      <p className={"text-xs mb-3 " + mutedText}>Os 3 criativos com melhor performance de cada marca no período selecionado acima — investimento, leads e custo por lead</p>
+                      <div className="flex flex-col gap-4">
+                        {creativesToRender.map((item) => (
+                          <TopCreativesBrandGroup key={item.brandId} item={item} dark={dark} cardBg={cardBg} mutedText={mutedText} onSelectCreative={setSelectedCreative} />
+                        ))}
+                      </div>
+                      {hasMoreCreatives && (
+                        <button onClick={() => setCreativesExpanded((v) => !v)}
+                          className={"mt-4 w-full flex items-center justify-center gap-1.5 py-2 rounded-md text-xs font-semibold border transition-colors " +
+                            (dark ? "bg-neutral-800 border-neutral-700 text-neutral-200 hover:bg-neutral-700" : "bg-neutral-100 border-neutral-200 text-neutral-700 hover:bg-neutral-200")}>
+                          {creativesExpanded ? "Ver menos" : "Ver todas (" + topCreativesToShow.length + ")"}
+                          <IconChevronDown className={"h-3.5 w-3.5 transition-transform" + (creativesExpanded ? " rotate-180" : "")} />
+                        </button>
+                      )}
+                    </>
+                  ),
+                },
+                organico: {
+                  show: organicoToShow.length > 0,
+                  className: "neon-top rounded-xl border p-4 " + (dark ? "is-dark " : "") + cardBg,
+                  style: { "--neon": "#ec4899" },
+                  content: (
+                    <>
+                      <h2 className="text-sm font-bold mb-1 pr-8 flex items-center gap-1.5"><IconInstagram className="h-4 w-4 text-pink-500" /> Alcance Orgânico no Instagram</h2>
+                      <p className={"text-xs mb-3 " + mutedText}>Post com mais curtidas e seguidores conquistados no período, por conta</p>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                        {organicoToRender.map((item) => (
+                          <OrganicAccountCard key={item.instagramAccountId} item={item} dark={dark} cardBg={cardBg} mutedText={mutedText} range={range} />
+                        ))}
+                      </div>
+                      {hasMoreOrganico && (
+                        <button onClick={() => setOrganicoExpanded((v) => !v)}
+                          className={"mt-4 w-full flex items-center justify-center gap-1.5 py-2 rounded-md text-xs font-semibold border transition-colors " +
+                            (dark ? "bg-neutral-800 border-neutral-700 text-neutral-200 hover:bg-neutral-700" : "bg-neutral-100 border-neutral-200 text-neutral-700 hover:bg-neutral-200")}>
+                          {organicoExpanded ? "Ver menos" : "Ver todas (" + organicoToShow.length + ")"}
+                          <IconChevronDown className={"h-3.5 w-3.5 transition-transform" + (organicoExpanded ? " rotate-180" : "")} />
+                        </button>
+                      )}
+                    </>
+                  ),
+                },
+                noticias: {
+                  show: permissoes.verNoticias && noticiasToShow.length > 0,
+                  className: "neon-top rounded-xl border p-4 " + (dark ? "is-dark " : "") + (marcaFiltro !== "todas" ? "overflow-hidden " : "") + cardBg,
+                  style: { "--neon": "#f59e0b" },
+                  content: (
+                    <>
+                      <h2 className="text-sm font-bold mb-1 pr-8 flex items-center gap-1.5"><IconSparkle className="h-4 w-4 text-amber-500" /> Notícias do Setor</h2>
+                      <p className={"text-xs mb-3 " + mutedText}>Manchetes recentes de portais automotivos (Quatro Rodas, Motor1, AutoPapo) que citam as marcas do grupo — atualiza sozinho às 08h e 15h, ou ao clicar em "Atualizar"</p>
+                      {marcaFiltro !== "todas" ? (
+                        <NewsCarousel itens={(noticiasToShow[0] || {}).itens || []} dark={dark} mutedText={mutedText} />
+                      ) : (
+                        <>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                            {noticiasToRender.map((item) => (
+                              <NewsBrandGroup key={item.brandId} item={item} dark={dark} mutedText={mutedText} />
+                            ))}
+                          </div>
+                          {hasMoreNoticias && (
+                            <button onClick={() => setNoticiasExpanded((v) => !v)}
+                              className={"mt-4 w-full flex items-center justify-center gap-1.5 py-2 rounded-md text-xs font-semibold border transition-colors " +
+                                (dark ? "bg-neutral-800 border-neutral-700 text-neutral-200 hover:bg-neutral-700" : "bg-neutral-100 border-neutral-200 text-neutral-700 hover:bg-neutral-200")}>
+                              {noticiasExpanded ? "Ver menos" : "Ver todas (" + noticiasToShow.length + ")"}
+                              <IconChevronDown className={"h-3.5 w-3.5 transition-transform" + (noticiasExpanded ? " rotate-180" : "")} />
+                            </button>
+                          )}
+                        </>
+                      )}
+                    </>
+                  ),
+                },
+                evolucao: {
+                  show: true,
+                  className: "rounded-xl border p-4 " + cardBg,
+                  style: undefined,
+                  content: (
+                    <>
+                      <h2 className="text-sm font-bold mb-1 pr-8">Investimento Diário vs. Leads Gerados</h2>
+                      <p className={"text-xs mb-3 " + mutedText}>Evolução no período selecionado</p>
+                      <ChartLegend dark={dark} items={[
+                        { shape: "line", color: "#3b82f6", label: "Investimento (R$) — área e linha" },
+                        { shape: "line", color: "#f59e0b", label: "Leads gerados — linha tracejada e pontos", dashed: true },
+                      ]} />
+                      {loading ? <div className="h-[280px] flex items-center justify-center text-xs text-neutral-500">Carregando dados...</div> : <EvolutionChart data={evolucaoDiaria} dark={dark} />}
+                    </>
+                  ),
+                },
+                ranking: {
+                  show: brandsToShow.length > 1,
+                  className: "neon-top rounded-xl border p-4 " + (dark ? "is-dark " : "") + cardBg,
+                  style: { "--neon": "#3b82f6" },
+                  content: (
+                    <>
+                      <h2 className="text-sm font-bold mb-1 pr-8">Desempenho por Marca</h2>
+                      <p className={"text-xs mb-3 " + mutedText}>Ranking de leads e investimento no período — passe o mouse para ver os valores</p>
+                      <ChartLegend dark={dark} items={[
+                        { shape: "bar", color: "#3b82f6", label: "Leads gerados — barras" },
+                        { shape: "line", color: "#f59e0b", label: "Investimento (R$) — linha tracejada e pontos", dashed: true },
+                      ]} />
+                      <RankingChart data={rankingMarcas} dark={dark} />
+                    </>
+                  ),
+                },
+                mapaMeta: {
+                  show: mapaCalorMetaToShow.length > 0,
+                  className: "neon-top rounded-xl border p-4 " + (dark ? "is-dark " : "") + cardBg,
+                  style: { "--neon": "#22d3ee" },
+                  content: (
+                    <>
+                      <h2 className="text-sm font-bold mb-1 pr-8 flex items-center gap-1.5">🗺️ Mapa de Calor por Estado (Meta Ads)</h2>
+                      <p className={"text-xs mb-3 " + mutedText}>
+                        Gasto e leads reais por estado nos últimos 30 dias — o Meta não abre por cidade como o Google Ads, só por estado.
+                        Clique num estado pra ver quais cidades os anúncios ativos têm configurado ali.
+                      </p>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                        {mapaToRender.map((item) => (
+                          <RegionHeatmapBrandGroup key={item.brandId} item={item} dark={dark} mutedText={mutedText}
+                            onAbrirCidades={(brandId, marca, regiao) => setCidadesModalInfo({ brandId, marca, regiao })} />
+                        ))}
+                      </div>
+                      {hasMoreMapa && (
+                        <button onClick={() => setMapaExpanded((v) => !v)}
+                          className={"mt-4 w-full flex items-center justify-center gap-1.5 py-2 rounded-md text-xs font-semibold border transition-colors " +
+                            (dark ? "bg-neutral-800 border-neutral-700 text-neutral-200 hover:bg-neutral-700" : "bg-neutral-100 border-neutral-200 text-neutral-700 hover:bg-neutral-200")}>
+                          {mapaExpanded ? "Ver menos" : "Ver todas (" + mapaCalorMetaToShow.length + ")"}
+                          <IconChevronDown className={"h-3.5 w-3.5 transition-transform" + (mapaExpanded ? " rotate-180" : "")} />
+                        </button>
+                      )}
+                    </>
+                  ),
+                },
+                saldo: {
+                  show: permissoes.verSaldo,
+                  className: "neon-top rounded-xl border p-4 " + (dark ? "is-dark " : "") + cardBg,
+                  style: { "--neon": "#10b981" },
+                  content: (
+                    <>
+                      <h2 className="text-sm font-bold mb-1 pr-8">Saldo das Contas de Anúncios (Meta Ads)</h2>
+                      <p className={"text-xs mb-4 " + mutedText}>Runway estimado: saldo atual ÷ orçamento planejado · Crítico ≤{RUNWAY_CRITICO}d · Atenção ≤{RUNWAY_ATENCAO}d — "Orç. Real" é o que está configurado agora no Meta, lido a cada sincronização</p>
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-sm min-w-[760px]">
+                        <thead><tr className={"text-left text-xs uppercase tracking-wide " + mutedText}>
+                          <SortableTh label="Marca" sortKey="marca" sortConfig={sortConfig} onSort={handleSort} />
+                          <SortableTh label="Investimento" sortKey="gasto" sortConfig={sortConfig} onSort={handleSort} />
+                          <SortableTh label="Leads" sortKey="quantidade" sortConfig={sortConfig} onSort={handleSort} />
+                          <SortableTh label="CPL" sortKey="cpl" sortConfig={sortConfig} onSort={handleSort} />
+                          <SortableTh label="Saldo Atual" sortKey="saldoAtual" sortConfig={sortConfig} onSort={handleSort} />
+                          <SortableTh label="Orç. Planejado" sortKey="diarioEsperado" sortConfig={sortConfig} onSort={handleSort} />
+                          <SortableTh label="Orç. Real (Meta)" sortKey="orcamentoReal" sortConfig={sortConfig} onSort={handleSort} />
+                          <SortableTh label="Runway" sortKey="diasRestantes" sortConfig={sortConfig} onSort={handleSort} />
+                          <SortableTh label="Status" sortKey="status" sortConfig={sortConfig} onSort={handleSort} />
+                        </tr></thead>
+                        <tbody className={"divide-y " + (dark ? "divide-neutral-800" : "divide-neutral-100")}>
+                          {linhasSaldoOrdenadas.map((row) => (
+                            <tr key={row.marca}>
+                              <td className="py-2.5 font-semibold">
+                                <div className="flex items-center gap-1.5">
+                                  <span>{row.marca}</span>
+                                  {row.brandId != null && (
+                                    <button onClick={() => setDiagnosticoInfo({ brandId: row.brandId, marca: row.marca })}
+                                      title="Diagnóstico de campanha"
+                                      className={"shrink-0 p-1 rounded-md transition-colors " + (dark ? "text-neutral-500 hover:text-neutral-200 hover:bg-neutral-800" : "text-neutral-400 hover:text-neutral-700 hover:bg-neutral-100")}>
+                                      <IconSearch className="h-3.5 w-3.5" />
+                                    </button>
+                                  )}
+                                </div>
+                              </td>
+                              <td className="py-2.5 tabular-nums">{fmtBRL(row.gasto)}</td>
+                              <td className="py-2.5 tabular-nums">{fmtNum(row.quantidade)}</td>
+                              <td className="py-2.5 tabular-nums">{fmtBRL(row.cpl)}</td>
+                              <td className="py-2.5 tabular-nums">{fmtBRL(row.saldoAtual)}</td>
+                              <td className="py-2.5 tabular-nums">{fmtBRL(row.diarioEsperado)}</td>
+                              <td className="py-2.5 tabular-nums">
+                                {row.orcamentoReal == null ? (
+                                  <span className={mutedText}>—</span>
+                                ) : (
+                                  <span className="inline-flex items-center gap-1">
+                                    <span className={row.orcamentoDivergente ? (dark ? "text-amber-400 font-semibold" : "text-amber-700 font-semibold") : ""}
+                                      title={row.orcamentoDivergente ? "Diferente do orçamento planejado em mais de 10% — confira a campanha no Meta." : ""}>
+                                      {fmtBRL(row.orcamentoReal)}
+                                    </span>
+                                    {row.orcamentoSubutilizado && (
+                                      <span title={`Gastando em média ${fmtBRL(row.gastoMedioRecente)}/dia, bem abaixo do orçamento configurado — pode ser fase de aprendizado ou público pequeno demais.`}>
+                                        <IconGauge className={"h-3.5 w-3.5 shrink-0 " + (dark ? "text-cyan-400" : "text-cyan-600")} />
+                                      </span>
+                                    )}
+                                  </span>
+                                )}
+                              </td>
+                              <td className="py-2.5 tabular-nums">{row.diasRestantes !== null ? row.diasRestantes.toFixed(1) + "d" : "—"}</td>
+                              <td className="py-2.5"><StatusPill status={row.status} dark={dark} /></td>
+                            </tr>
+                          ))}
+                        </tbody>
+                        <tfoot>
+                          <tr className={"border-t font-semibold " + (dark ? "border-neutral-800" : "border-neutral-200")}>
+                            <td className="py-2.5">Total ({linhasSaldo.length})</td>
+                            <td className="py-2.5 tabular-nums">{fmtBRL(totalsSaldo.gasto)}</td>
+                            <td className="py-2.5 tabular-nums">{fmtNum(totalsSaldo.quantidade)}</td>
+                            <td className="py-2.5 tabular-nums">{fmtBRL(totalsSaldo.cpl)}</td>
+                            <td className="py-2.5 tabular-nums">{fmtBRL(totalsSaldo.saldoAtual)}</td>
+                            <td className="py-2.5 tabular-nums">{fmtBRL(totalsSaldo.diarioEsperado)}</td>
+                            <td className="py-2.5 tabular-nums">{fmtBRL(totalsSaldo.orcamentoReal)}</td>
+                            <td className="py-2.5" colSpan="2">
+                              <span className={contasEmRisco > 0 ? (dark ? "text-amber-400" : "text-amber-700") : mutedText}>
+                                {contasEmRisco} conta{contasEmRisco === 1 ? "" : "s"} em risco
+                              </span>
+                            </td>
+                          </tr>
+                        </tfoot>
+                      </table>
+                      </div>
+                    </>
+                  ),
+                },
+              };
 
-            {organicoToShow.length > 0 && (
-              <div className={"neon-top rounded-xl border p-4 " + (dark ? "is-dark " : "") + cardBg} style={{ "--neon": "#ec4899" }}>
-                <h2 className="text-sm font-bold mb-1 flex items-center gap-1.5"><IconInstagram className="h-4 w-4 text-pink-500" /> Alcance Orgânico no Instagram</h2>
-                <p className={"text-xs mb-3 " + mutedText}>Post com mais curtidas e seguidores conquistados no período, por conta</p>
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                  {organicoToRender.map((item) => (
-                    <OrganicAccountCard key={item.instagramAccountId} item={item} dark={dark} cardBg={cardBg} mutedText={mutedText} range={range} />
-                  ))}
-                </div>
-                {hasMoreOrganico && (
-                  <button onClick={() => setOrganicoExpanded((v) => !v)}
-                    className={"mt-4 w-full flex items-center justify-center gap-1.5 py-2 rounded-md text-xs font-semibold border transition-colors " +
-                      (dark ? "bg-neutral-800 border-neutral-700 text-neutral-200 hover:bg-neutral-700" : "bg-neutral-100 border-neutral-200 text-neutral-700 hover:bg-neutral-200")}>
-                    {organicoExpanded ? "Ver menos" : "Ver todas (" + organicoToShow.length + ")"}
-                    <IconChevronDown className={"h-3.5 w-3.5 transition-transform" + (organicoExpanded ? " rotate-180" : "")} />
-                  </button>
-                )}
-              </div>
-            )}
-
-            {permissoes.verNoticias && noticiasToShow.length > 0 && (
-              <div className={"neon-top rounded-xl border p-4 " + (dark ? "is-dark " : "") + (marcaFiltro !== "todas" ? "overflow-hidden " : "") + cardBg} style={{ "--neon": "#f59e0b" }}>
-                <h2 className="text-sm font-bold mb-1 flex items-center gap-1.5"><IconSparkle className="h-4 w-4 text-amber-500" /> Notícias do Setor</h2>
-                <p className={"text-xs mb-3 " + mutedText}>Manchetes recentes de portais automotivos (Quatro Rodas, Motor1, AutoPapo) que citam as marcas do grupo — atualiza sozinho às 08h e 15h, ou ao clicar em "Atualizar"</p>
-                {marcaFiltro !== "todas" ? (
-                  <NewsCarousel itens={(noticiasToShow[0] || {}).itens || []} dark={dark} mutedText={mutedText} />
-                ) : (
-                  <>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                      {noticiasToRender.map((item) => (
-                        <NewsBrandGroup key={item.brandId} item={item} dark={dark} mutedText={mutedText} />
-                      ))}
-                    </div>
-                    {hasMoreNoticias && (
-                      <button onClick={() => setNoticiasExpanded((v) => !v)}
-                        className={"mt-4 w-full flex items-center justify-center gap-1.5 py-2 rounded-md text-xs font-semibold border transition-colors " +
-                          (dark ? "bg-neutral-800 border-neutral-700 text-neutral-200 hover:bg-neutral-700" : "bg-neutral-100 border-neutral-200 text-neutral-700 hover:bg-neutral-200")}>
-                        {noticiasExpanded ? "Ver menos" : "Ver todas (" + noticiasToShow.length + ")"}
-                        <IconChevronDown className={"h-3.5 w-3.5 transition-transform" + (noticiasExpanded ? " rotate-180" : "")} />
-                      </button>
-                    )}
-                  </>
-                )}
-              </div>
-            )}
-
-            <div className={"rounded-xl border p-4 " + cardBg}>
-              <h2 className="text-sm font-bold mb-1">Investimento Diário vs. Leads Gerados</h2>
-              <p className={"text-xs mb-3 " + mutedText}>Evolução no período selecionado</p>
-              <ChartLegend dark={dark} items={[
-                { shape: "line", color: "#3b82f6", label: "Investimento (R$) — área e linha" },
-                { shape: "line", color: "#f59e0b", label: "Leads gerados — linha tracejada e pontos", dashed: true },
-              ]} />
-              {loading ? <div className="h-[280px] flex items-center justify-center text-xs text-neutral-500">Carregando dados...</div> : <EvolutionChart data={evolucaoDiaria} dark={dark} />}
-            </div>
-
-            {brandsToShow.length > 1 && (
-              <div className={"neon-top rounded-xl border p-4 " + (dark ? "is-dark " : "") + cardBg} style={{ "--neon": "#3b82f6" }}>
-                <h2 className="text-sm font-bold mb-1">Desempenho por Marca</h2>
-                <p className={"text-xs mb-3 " + mutedText}>Ranking de leads e investimento no período — passe o mouse para ver os valores</p>
-                <ChartLegend dark={dark} items={[
-                  { shape: "bar", color: "#3b82f6", label: "Leads gerados — barras" },
-                  { shape: "line", color: "#f59e0b", label: "Investimento (R$) — linha tracejada e pontos", dashed: true },
-                ]} />
-                <RankingChart data={rankingMarcas} dark={dark} />
-              </div>
-            )}
-
-            {permissoes.verSaldo && (
-            <div className={"neon-top rounded-xl border p-4 " + (dark ? "is-dark " : "") + cardBg} style={{ "--neon": "#10b981" }}>
-              <h2 className="text-sm font-bold mb-1">Saldo das Contas de Anúncios (Meta Ads)</h2>
-              <p className={"text-xs mb-4 " + mutedText}>Runway estimado: saldo atual ÷ diário esperado · Crítico ≤{RUNWAY_CRITICO}d · Atenção ≤{RUNWAY_ATENCAO}d</p>
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm min-w-[680px]">
-                <thead><tr className={"text-left text-xs uppercase tracking-wide " + mutedText}>
-                  <SortableTh label="Marca" sortKey="marca" sortConfig={sortConfig} onSort={handleSort} />
-                  <SortableTh label="Investimento" sortKey="gasto" sortConfig={sortConfig} onSort={handleSort} />
-                  <SortableTh label="Leads" sortKey="quantidade" sortConfig={sortConfig} onSort={handleSort} />
-                  <SortableTh label="CPL" sortKey="cpl" sortConfig={sortConfig} onSort={handleSort} />
-                  <SortableTh label="Saldo Atual" sortKey="saldoAtual" sortConfig={sortConfig} onSort={handleSort} />
-                  <SortableTh label="Diário Esperado" sortKey="diarioEsperado" sortConfig={sortConfig} onSort={handleSort} />
-                  <SortableTh label="Runway" sortKey="diasRestantes" sortConfig={sortConfig} onSort={handleSort} />
-                  <SortableTh label="Status" sortKey="status" sortConfig={sortConfig} onSort={handleSort} />
-                </tr></thead>
-                <tbody className={"divide-y " + (dark ? "divide-neutral-800" : "divide-neutral-100")}>
-                  {linhasSaldoOrdenadas.map((row) => (
-                    <tr key={row.marca}>
-                      <td className="py-2.5 font-semibold">{row.marca}</td>
-                      <td className="py-2.5 tabular-nums">{fmtBRL(row.gasto)}</td>
-                      <td className="py-2.5 tabular-nums">{fmtNum(row.quantidade)}</td>
-                      <td className="py-2.5 tabular-nums">{fmtBRL(row.cpl)}</td>
-                      <td className="py-2.5 tabular-nums">{fmtBRL(row.saldoAtual)}</td>
-                      <td className="py-2.5 tabular-nums">{fmtBRL(row.diarioEsperado)}</td>
-                      <td className="py-2.5 tabular-nums">{row.diasRestantes !== null ? row.diasRestantes.toFixed(1) + "d" : "—"}</td>
-                      <td className="py-2.5"><StatusPill status={row.status} dark={dark} /></td>
-                    </tr>
-                  ))}
-                </tbody>
-                <tfoot>
-                  <tr className={"border-t font-semibold " + (dark ? "border-neutral-800" : "border-neutral-200")}>
-                    <td className="py-2.5">Total ({linhasSaldo.length})</td>
-                    <td className="py-2.5 tabular-nums">{fmtBRL(totalsSaldo.gasto)}</td>
-                    <td className="py-2.5 tabular-nums">{fmtNum(totalsSaldo.quantidade)}</td>
-                    <td className="py-2.5 tabular-nums">{fmtBRL(totalsSaldo.cpl)}</td>
-                    <td className="py-2.5 tabular-nums">{fmtBRL(totalsSaldo.saldoAtual)}</td>
-                    <td className="py-2.5 tabular-nums">{fmtBRL(totalsSaldo.diarioEsperado)}</td>
-                    <td className="py-2.5" colSpan="2">
-                      <span className={contasEmRisco > 0 ? (dark ? "text-amber-400" : "text-amber-700") : mutedText}>
-                        {contasEmRisco} conta{contasEmRisco === 1 ? "" : "s"} em risco
-                      </span>
-                    </td>
-                  </tr>
-                </tfoot>
-              </table>
-              </div>
-            </div>
-            )}
+              return blocoOrdem.map((id) => {
+                const b = blocosDef[id];
+                if (!b || !b.show) return null;
+                return (
+                  <DraggableBlock key={id} id={id} className={b.className} style={b.style} dark={dark}
+                    isDragging={blocoArrastando === id} isOver={blocoSobre === id && blocoArrastando !== id}
+                    onDragStartId={setBlocoArrastando} onDragOverId={setBlocoSobre} onDropId={moverBloco}
+                    onDragEndReset={() => { setBlocoArrastando(null); setBlocoSobre(null); }}>
+                    {b.content}
+                  </DraggableBlock>
+                );
+              });
+            })()}
 
             <footer className={"text-center text-[11px] py-2 " + mutedText}>FEFO · Vendas e test-drives serão integrados em uma etapa futura (outro sistema) · v{APP_VERSION}</footer>
           </>

@@ -25,9 +25,14 @@ MARCADOR_INICIO = "Veiculação iniciada"
 MARCADOR_PATROCINADO = "Patrocinado"
 
 # Linhas de interface que aparecem no meio do anúncio e não fazem parte do texto dele.
+# O rodapé da Biblioteca ("Status do sistema API...Privacidade Termos Cookies...") e o
+# cronômetro de vídeo ("0:00 / 0:20") entraram aqui depois de aparecerem grudados no fim do
+# último anúncio de uma coleta real — o navegador cola esses textos de interface sem espaço
+# entre eles, então o padrão casa só com o início da linha e descarta o resto junto.
 LIXO = re.compile(
     r"^(Menu|Ver detalhes|Ver mais|Ver resumo|Plataformas|Ativo|Inativo|Patrocinado|"
-    r"Esse anúncio tem|Identificação da biblioteca|Veiculação iniciada)"
+    r"Esse anúncio tem|Identificação da biblioteca|Veiculação iniciada|"
+    r"Status do sistema API|\d:\d\d\s*/\s*\d:\d\d)"
 )
 
 CTAS = [
@@ -35,34 +40,50 @@ CTAS = [
     "Ligar", "Sign Up", "Learn More", "Send Message", "Shop Now", "Contact Us",
 ]
 
-# Modelos reconhecidos. A ordem importa: os nomes compostos vêm primeiro pra "Corolla Cross"
-# não ser classificado como "Corolla", e "Yaris Cross" não virar "Yaris".
-# A lista passa da marca do próprio concorrente porque o pátio de seminovos é multimarca —
-# numa coleta real da Kampai (Toyota) apareceram Jeep Commander e Honda City.
-MODELOS = [
-    ("Corolla Cross", r"corolla\s*cross"),
-    ("Yaris Cross", r"yaris\s*cross"),
-    ("Hilux", r"hilux"),
-    ("SW4", r"\bsw4\b"),
-    ("Corolla", r"\bcorolla\b"),
-    ("Yaris", r"\byaris\b"),
-    ("RAV4", r"\brav\s?-?\s?4\b"),
-    ("Etios", r"\betios\b"),
-    # outras marcas, comuns em anúncio de seminovo
-    ("Commander", r"\bcommander\b"),
-    ("Compass", r"\bcompass\b"),
-    ("Renegade", r"\brenegade\b"),
-    ("City", r"\bcity\b"),
-    ("Civic", r"\bcivic\b"),
-    ("HR-V", r"\bhr\s?-?\s?v\b"),
-    ("T-Cross", r"\bt\s?-?\s?cross\b"),
-    ("Creta", r"\bcreta\b"),
-    ("Tracker", r"\btracker\b"),
-    ("Onix", r"\bonix\b"),
-    ("Kicks", r"\bkicks\b"),
-    ("Ranger", r"\branger\b"),
-    ("S10", r"\bs10\b"),
-]
+# Fallback só pra o módulo funcionar sozinho (testes, uso avulso) se ninguém passar uma lista
+# de verdade. Em produção, app.concorrentes carrega ModeloVeiculo do banco e passa pra
+# parse_biblioteca — é lá que mora a lista de verdade, editável sem mexer em código (ver
+# app.models.ModeloVeiculo).
+MODELOS_FALLBACK = ["Corolla Cross", "Corolla", "Hilux Chassi", "Hilux", "SW4"]
+
+
+# Dobra de acento: tanto a letra pura quanto qualquer variante acentuada apontam pra mesma
+# classe — é o que permite "Série" no cadastro casar com "Serie" digitado sem acento no
+# anúncio, e vice-versa, nos dois sentidos.
+_GRUPOS_ACENTO = [("a", "áàãâ"), ("e", "éê"), ("i", "í"), ("o", "óôõ"), ("u", "ú"), ("c", "ç")]
+_DOBRA_ACENTO: dict[str, str] = {}
+for _base, _variantes in _GRUPOS_ACENTO:
+    _classe = f"[{_base}{_variantes}]"
+    _DOBRA_ACENTO[_base] = _classe
+    for _v in _variantes:
+        _DOBRA_ACENTO[_v] = _classe
+
+
+def construir_padrao(modelo: str) -> str:
+    """Monta o regex de um modelo automaticamente a partir do nome puro (ex.: "T-Cross",
+    "Hilux Chassi") — não precisa mais escrever regex à mão pra cada modelo novo.
+
+    Espaço e hífen entre as palavras viram opcionais e intercambiáveis (o mesmo padrão que já
+    usávamos manualmente pra "T-Cross"/"HR-V"), porque o mesmo anúncio aparece grafado como
+    "T-Cross", "T Cross" ou "TCross" dependendo de quem escreveu. Vogal acentuada também casa
+    sem acento (e o contrário) — útil pra "Série" também achar "Serie".
+    """
+    partes = []
+    for palavra in re.split(r"[\s-]+", modelo.strip()):
+        if not palavra:
+            continue
+        letras = [_DOBRA_ACENTO.get(ch.lower(), re.escape(ch)) for ch in palavra]
+        partes.append("".join(letras))
+    return r"\b" + r"\s?-?\s?".join(partes) + r"\b"
+
+
+def _modelos_ordenados(modelos: list[str]) -> list[tuple[str, str]]:
+    # O mais comprido primeiro: "Corolla Cross" precisa ser tentado antes de "Corolla", senão
+    # o genérico vence e o composto nunca é alcançado. Generaliza a ordem que antes tinha que
+    # ser mantida à mão na lista.
+    unicos = sorted(set(modelos), key=len, reverse=True)
+    return [(nome, construir_padrao(nome)) for nome in unicos]
+
 
 # Tipos de campanha, na ordem de prioridade: um anúncio "PcD" que também cita consórcio é,
 # antes de tudo, PcD — o público é o que define a campanha.
@@ -121,6 +142,28 @@ def _preco_de_por(texto: str) -> tuple[float | None, float | None]:
         except ValueError:
             pass
     return None, None
+
+
+def _preco_unico(texto: str) -> float | None:
+    """Preço anunciado sozinho, sem par "de/por" — oferta direta tipo "por apenas R$ X".
+
+    Só roda quando _preco_de_por não achou par nenhum. A Kampai sempre anuncia com desconto
+    ("de X por Y"); a Recol (Ford) anuncia com preço único ("Territory por apenas R$ 199.900"),
+    categoria que o parser não tratava — 5 de 7 anúncios de uma coleta real ficavam sem preço
+    nenhum por causa disso.
+
+    Quando há mais de uma menção de "por R$" no mesmo anúncio, fica com a ÚLTIMA: o texto
+    costuma citar um valor de contexto primeiro ("entregava tudo que você procura por
+    R$149.990") e o preço de verdade da oferta por último ("agora por apenas R$139.990!") —
+    pegar o primeiro valor anunciaria um preço que não é mais o da oferta.
+    """
+    valores = re.findall(r"\bpor\s+(?:apenas\s+)?R\$\s*([\d][\d.]*(?:,\d{2})?)", texto, re.I)
+    if not valores:
+        return None
+    try:
+        return float(valores[-1].replace(".", "").replace(",", "."))
+    except ValueError:
+        return None
 
 
 def _bonus(texto: str) -> float | None:
@@ -187,16 +230,41 @@ def _tipo_campanha(texto: str) -> str | None:
     return tipo
 
 
-def _modelo(texto: str) -> str | None:
-    # "Hilux Chassi" está no fim da lista por causa da ordem dos compostos, então é testado antes
-    # do "Hilux" genérico aqui.
-    if re.search(r"hilux\s*chassi", texto, re.I):
-        return "Hilux Chassi"
-    return _classificar(texto, MODELOS)
+def _modelo(texto: str, modelos_ordenados: list[tuple[str, str]]) -> str | None:
+    """Escolhe o modelo certo quando mais de um nome bate no mesmo texto.
+
+    Não usa _classificar aqui (que devolve o primeiro da LISTA que casar, ordem arbitrária
+    pra nomes do mesmo tamanho) — em vez disso, testa todos os candidatos e fica com o que
+    começa mais CEDO no texto. Isso resolve dois casos ao mesmo tempo:
+
+    - "Corolla Cross" x "Corolla": os dois começam no MESMO ponto do texto (Corolla é prefixo
+      de Corolla Cross), e aí desempata pelo nome mais comprido — o composto vence, do jeito
+      que já era antes.
+    - "Etios e Yaris" (mesmo anúncio cita os dois, tamanho de nome igual): antes a escolha
+      dependia da ordem de iteração de um `set` em Python, que não é garantida — rodar a
+      mesma coleta duas vezes podia devolver modelos diferentes. Agora fica sempre com o que
+      é citado primeiro no texto, que é determinístico e é o que uma pessoa lendo diria.
+    """
+    melhor: tuple[int, int] | None = None
+    nome_escolhido: str | None = None
+    for nome, padrao in modelos_ordenados:
+        m = re.search(padrao, texto, re.I)
+        if not m:
+            continue
+        chave = (m.start(), -len(nome))
+        if melhor is None or chave < melhor:
+            melhor, nome_escolhido = chave, nome
+    return nome_escolhido
 
 
-def parse_biblioteca(texto_colado: str) -> list[dict]:
-    """Recebe o texto bruto copiado da página da Biblioteca e devolve a lista de anúncios."""
+def parse_biblioteca(texto_colado: str, modelos: list[str] | None = None) -> list[dict]:
+    """Recebe o texto bruto copiado da página da Biblioteca e devolve a lista de anúncios.
+
+    `modelos` é a lista de nomes puros (ex.: ["Corolla Cross", "Hilux", ...]) vinda do banco
+    (app.models.ModeloVeiculo) — quem chama isso normalmente é app.concorrentes, que já busca
+    essa lista antes de importar. Sem ela, usa MODELOS_FALLBACK (só o suficiente pra este
+    módulo funcionar sozinho fora do fluxo normal)."""
+    modelos_ordenados = _modelos_ordenados(modelos if modelos is not None else MODELOS_FALLBACK)
     linhas = [l.strip() for l in (texto_colado or "").split("\n")]
     inicios = [i for i, l in enumerate(linhas) if l.startswith(MARCADOR_ID)]
 
@@ -228,11 +296,13 @@ def parse_biblioteca(texto_colado: str) -> list[dict]:
         texto = re.sub(r"\s+", " ", texto).strip()
 
         de, por = _preco_de_por(texto)
+        if de is None and por is None:
+            por = _preco_unico(texto)
         anuncios.append({
             "ad_library_id": ad_id,
             "pagina": pagina,
             "inicio": inicio,
-            "modelo": _modelo(texto),
+            "modelo": _modelo(texto, modelos_ordenados),
             "tipo_campanha": _tipo_campanha(texto),
             "preco_de": de,
             "preco_por": por,

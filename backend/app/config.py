@@ -61,5 +61,9 @@ NBS_DEMO_MODE = True
 # painel deles precisa incluir "?token=" com esse valor, já que eles não assinam as requisições.
 FOLLOWIZE_WEBHOOK_TOKEN = os.environ.get("FOLLOWIZE_WEBHOOK_TOKEN", "").strip()
 
+# Mesma ideia, pro bloco de "Enviar Webhook" configurado no bot da Letalk — a documentação
+# deles confirma que não mandam token nem cabeçalho nenhum, só o corpo em JSON.
+LETALK_WEBHOOK_TOKEN = os.environ.get("LETALK_WEBHOOK_TOKEN", "").strip()
+
 ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "admin@raviera.local")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "troque-esta-senha")

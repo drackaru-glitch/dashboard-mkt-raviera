@@ -46,7 +46,6 @@ class GoogleAdsAccountOut(GoogleAdsAccountIn):
 
 class BrandIn(BaseModel):
     nome: str
-    tier: str = ""
     ad_account_id: Optional[int] = None
     campaign_filter: Optional[str] = None
     diario_esperado_meta: float = 0
@@ -58,6 +57,7 @@ class BrandIn(BaseModel):
 
 class BrandOut(BrandIn):
     id: int
+    orcamento_diario_real: Optional[float] = None  # lido do Meta na sincronização, não digitado
 
     class Config:
         from_attributes = True
@@ -132,3 +132,10 @@ class ConcorrenteTextoIn(BaseModel):
 
     texto: str
     paginas: Optional[list[str]] = None
+
+
+class OrdemBlocosIn(BaseModel):
+    """Ordem em que a pessoa arrastou os quadros do painel principal, um id por quadro
+    (ex.: "saldo", "evolucao", "topCriativos" — os ids são definidos no frontend)."""
+
+    ordem: list[str]

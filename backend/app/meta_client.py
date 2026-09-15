@@ -58,6 +58,53 @@ def get_campaign_destinos(meta_account_id: str) -> dict[str, str]:
     return destinos
 
 
+def get_campaign_orcamentos(meta_account_id: str) -> dict[str, float]:
+    """Nome da campanha -> orçamento diário REAL configurado agora no Meta (em R$), só de
+    conjuntos ativos. Não confundir com `diario_esperado_meta` do banco (Brand): aquele é
+    digitado à mão na tela de Marcas e não se atualiza sozinho quando alguém reajusta o
+    orçamento direto no Gerenciador de Anúncios — este aqui é lido de novo a cada sincronização.
+
+    Deduplica CBO (Campaign Budget Optimization) x ABO (orçamento por conjunto): numa campanha
+    CBO, `campaign.daily_budget` é UM valor só pra campanha inteira, não por conjunto — somar
+    esse valor uma vez por conjunto multiplicaria o orçamento pelo número de conjuntos.
+
+    Chamada separada de `get_campaign_destinos` de propósito: aquela decide contagem de lead
+    (já causou um incidente sério, ver DESTINOS_CONVERSA acima) — não vale economizar uma
+    chamada de API (~1 a 3s) arriscando mexer nela.
+
+    IMPORTANTE — `effective_status == "ACTIVE"` aqui NÃO garante que a campanha está gastando
+    de verdade: achamos campanha de meses passados ainda "ativa" e com orçamento configurado,
+    mas zero gasto real há dias (ninguém pausou, só parou de rodar). Por isso quem chama esta
+    função (sync.py) cruza o resultado com o gasto recente antes de somar por marca — não
+    trate o valor daqui como definitivo sem esse cruzamento.
+    """
+    data = _get(
+        f"{meta_account_id}/adsets",
+        {"fields": "daily_budget,effective_status,campaign{name,daily_budget}", "limit": 500},
+        meta_account_id,
+    )
+    orcamentos: dict[str, float] = {}
+    campanhas_cbo_contadas: set[str] = set()
+    for adset in data.get("data", []):
+        if adset.get("effective_status") != "ACTIVE":
+            continue  # conjunto pausado não consome orçamento — não deve inflar o "real"
+        campaign = adset.get("campaign") or {}
+        nome_campanha = campaign.get("name")
+        if not nome_campanha:
+            continue
+        orcamento_campanha = campaign.get("daily_budget")
+        if orcamento_campanha is not None:
+            # CBO: orçamento é da campanha, não do conjunto — soma uma vez só por campanha.
+            if nome_campanha not in campanhas_cbo_contadas:
+                orcamentos[nome_campanha] = float(orcamento_campanha) / 100
+                campanhas_cbo_contadas.add(nome_campanha)
+        else:
+            # ABO: cada conjunto tem seu próprio orçamento — soma todos os da campanha.
+            orcamento_adset = float(adset.get("daily_budget") or 0) / 100
+            orcamentos[nome_campanha] = orcamentos.get(nome_campanha, 0.0) + orcamento_adset
+    return orcamentos
+
+
 def _contar_leads(actions: list[dict] | None, eh_campanha_de_conversa: bool) -> tuple[int, int]:
     leads_formulario = 0
     leads_whatsapp = 0
@@ -217,3 +264,408 @@ def get_ads_daily(
                 }
             )
     return rows
+
+
+# Com `breakdowns=region` pedido, o Meta troca os nomes das ações de lead — a mesma armadilha
+# do incidente de 09/09/2026 (ver DESTINOS_CONVERSA), só que desta vez nem "lead" nem
+# "onsite_conversion.messaging_conversation_started_7d" aparecem NENHUMA vez nas linhas com
+# breakdown, mesmo quando a conta claramente teve os dois. Comparei os dois formatos lado a
+# lado no MESMO período pra achar o substituto certo, não estou supondo:
+#   sem breakdown:  lead=369                                          | messaging_conversation_started_7d=88
+#   com breakdown:  onsite_conversion.lead_grouped=369 (igual)        | onsite_conversion.total_messaging_connection=87 (~igual)
+# `lead_grouped` bateu exato; `total_messaging_connection` bateu a 1 de diferença (dentro do
+# ruído normal de atribuição) — por isso os dois entram aqui, e SÓ aqui (a contagem principal
+# em `_contar_leads` continua com `lead`/`messaging_conversation_started_7d`, intocada).
+LEAD_ACTION_TYPE_REGIAO = "onsite_conversion.lead_grouped"
+WHATSAPP_ACTION_TYPE_REGIAO = "onsite_conversion.total_messaging_connection"
+
+
+def _contar_leads_regiao(actions: list[dict] | None, eh_campanha_de_conversa: bool) -> int:
+    total = 0
+    for action in actions or []:
+        action_type = action.get("action_type")
+        if action_type == LEAD_ACTION_TYPE_REGIAO:
+            total += int(float(action.get("value", 0) or 0))
+        elif action_type == WHATSAPP_ACTION_TYPE_REGIAO and eh_campanha_de_conversa:
+            total += int(float(action.get("value", 0) or 0))
+    return total
+
+
+def get_region_performance(meta_account_id: str, days: int = 30, destinos: dict[str, str] | None = None) -> list[dict]:
+    """Gasto e leads por ESTADO (breakdown `region`) — é o nível mais fino de localização
+    real que o Meta expõe nos insights pra contas brasileiras. Testado direto na API: não
+    existe breakdown de cidade (`city` não é aceito, `zip` é aceito no schema mas rejeitado
+    na prática) — só `country`, `region` e `dma` (dma é exclusivo de mercado americano). Pra
+    saber quais cidades cada campanha tem configuradas, ver `get_campaign_cidades` — é um
+    dado diferente (segmentação, não resultado) e não deve ser somado com este.
+    """
+    since = (date.today() - timedelta(days=days)).isoformat()
+    until = date.today().isoformat()
+    data = _get(
+        f"{meta_account_id}/insights",
+        {
+            "level": "campaign",
+            "breakdowns": "region",
+            "time_range": f'{{"since":"{since}","until":"{until}"}}',
+            "fields": "campaign_name,spend,actions",
+            "limit": 500,
+        },
+        meta_account_id,
+    )
+    destinos = destinos or {}
+    rows = []
+    for entry in data.get("data", []):
+        eh_conversa = entry.get("campaign_name") in destinos
+        leads = _contar_leads_regiao(entry.get("actions"), eh_conversa)
+        regiao = entry.get("region") or "Desconhecida"
+        if regiao == "Unknown":  # o Meta devolve isso em inglês mesmo — traduz pro resto da tela
+            regiao = "Desconhecida"
+        rows.append(
+            {
+                "campaign_name": entry.get("campaign_name", ""),
+                "regiao": regiao,
+                "gasto": float(entry.get("spend", 0) or 0),
+                "leads": leads,
+            }
+        )
+    return rows
+
+
+def get_campaign_cidades(meta_account_id: str) -> dict[str, list[dict]]:
+    """Nome da campanha -> lista de {"cidade", "regiao"} que os conjuntos ATIVOS dessa
+    campanha têm configurados como segmentação geográfica (`targeting.geo_locations.cities`).
+
+    É intenção de segmentação, não resultado — uma cidade aparecer aqui não garante que
+    chegou lead de lá (ver get_region_performance pro dado real), só que o anúncio está
+    configurado pra tentar alcançá-la. Conjunto sem cidade específica (mirando o país inteiro,
+    por exemplo) simplesmente não contribui nenhuma cidade.
+    """
+    data = _get(
+        f"{meta_account_id}/adsets",
+        {"fields": "effective_status,targeting{geo_locations},campaign{name}", "limit": 500},
+        meta_account_id,
+    )
+    por_campanha: dict[str, dict[tuple, dict]] = {}
+    for adset in data.get("data", []):
+        if adset.get("effective_status") != "ACTIVE":
+            continue
+        campaign = adset.get("campaign") or {}
+        nome_campanha = campaign.get("name")
+        if not nome_campanha:
+            continue
+        cidades = ((adset.get("targeting") or {}).get("geo_locations") or {}).get("cities") or []
+        bucket = por_campanha.setdefault(nome_campanha, {})
+        for c in cidades:
+            nome_cidade, regiao = c.get("name"), c.get("region")
+            if not nome_cidade or not regiao:
+                continue
+            bucket[(nome_cidade, regiao)] = {"cidade": nome_cidade, "regiao": regiao}
+    return {nome: list(mapa.values()) for nome, mapa in por_campanha.items()}
+
+
+# Status de aprendizado que significam "o Meta ainda está entregando de forma conservadora,
+# testando o que funciona" — enquanto o conjunto estiver aqui, CPL tende a ficar mais caro que
+# quando sai (status vira "ACTIVE" no próprio learning_stage_info, não confundir com o
+# effective_status do conjunto, que já é ACTIVE desde antes de aprender).
+STATUS_APRENDIZADO_PRESO = {"LEARNING", "LEARNING_LIMITED"}
+
+
+def get_learning_status(meta_account_id: str) -> list[dict]:
+    """Conjuntos ATIVOS agora que ainda estão em fase de aprendizado (LEARNING/LEARNING_LIMITED),
+    com `last_sig_edit_ts` — quando o Meta considera que o ciclo de aprendizado ATUAL começou
+    (reseta a cada edição significativa: orçamento, público, criativo). Não convertemos pra
+    "dias travado" aqui: quem chama decide o limiar (ver notificacoes.gerar_alertas_aprendizado_travado).
+
+    Chamada leve e separada, no mesmo espírito de get_campaign_destinos: só campos escalares,
+    sem insight nem criativo — cabe numa sincronização diária sem pesar.
+    """
+    data = _get(
+        f"{meta_account_id}/adsets",
+        {"fields": "id,name,effective_status,learning_stage_info,campaign{name}", "limit": 500},
+        meta_account_id,
+    )
+    itens = []
+    for adset in data.get("data", []):
+        if adset.get("effective_status") != "ACTIVE":
+            continue
+        info = adset.get("learning_stage_info") or {}
+        status = info.get("status")
+        ts = info.get("last_sig_edit_ts")
+        if status not in STATUS_APRENDIZADO_PRESO or not ts:
+            continue
+        campaign = adset.get("campaign") or {}
+        itens.append(
+            {
+                "adset_id": adset.get("id"),
+                "adset_nome": adset.get("name"),
+                "campanha_nome": campaign.get("name", ""),
+                "status": status,
+                "last_sig_edit_ts": int(ts),
+            }
+        )
+    return itens
+
+
+def _construir_assinatura_publico(targeting: dict) -> str:
+    """Reduz um objeto `targeting` do Meta a um texto comparável (idade, gênero, geo,
+    interesses, públicos customizados/excluídos) — usado tanto pra achar conjuntos
+    competindo pelo mesmo público numa marca inteira (get_targeting_signatures) quanto dentro
+    de uma campanha só (get_campaign_diagnostico). Perde nuance de estrutura de propósito (ex.:
+    grupos "OR" dentro do `flexible_spec` viram uma lista achatada de IDs de interesse) — o
+    objetivo é achar duplicata EXATA (o caso real: BMW Auto Campo Grande, "LINHA X" e "LINHA M"
+    configurados idênticos por engano, 15/09/2026), não similaridade aproximada.
+    """
+    interesses = sorted(
+        str(spec.get("id"))
+        for grupo in (targeting.get("flexible_spec") or [])
+        for spec in (grupo.get("interests") or [])
+    )
+    publicos = sorted(str(p.get("id")) for p in (targeting.get("custom_audiences") or []))
+    excluidos = sorted(str(p.get("id")) for p in (targeting.get("excluded_custom_audiences") or []))
+    geo = targeting.get("geo_locations") or {}
+    geo_chave = sorted(
+        [c.get("key", "") for c in geo.get("cities", [])]
+        + [r.get("key", "") for r in geo.get("regions", [])]
+        + (geo.get("countries") or [])
+    )
+    return "|".join(
+        [
+            str(targeting.get("age_min")),
+            str(targeting.get("age_max")),
+            ",".join(str(g) for g in sorted(targeting.get("genders") or [])),
+            ",".join(geo_chave),
+            ",".join(interesses),
+            ",".join(publicos),
+            ",".join(excluidos),
+        ]
+    )
+
+
+TARGETING_FIELDS = (
+    "geo_locations,age_min,age_max,genders,flexible_spec,custom_audiences,excluded_custom_audiences"
+)
+
+
+def get_targeting_signatures(meta_account_id: str) -> list[dict]:
+    """Assinatura de público de cada conjunto ATIVO agora — usada pra achar conjuntos da MESMA
+    marca competindo pelo público idêntico (ver notificacoes.gerar_alertas_publico_sobreposto).
+    Só compara dentro da mesma `otimizacao` (quem chama agrupa por isso também): dois conjuntos
+    com público igual mas objetivo diferente (ex.: um gera cadastro, outro só engaja) não
+    disputam o mesmo leilão do mesmo jeito.
+
+    Chamada leve e separada, no mesmo espírito de get_campaign_destinos/get_learning_status.
+    """
+    data = _get(
+        f"{meta_account_id}/adsets",
+        {
+            "fields": f"id,name,effective_status,optimization_goal,campaign{{name}},targeting{{{TARGETING_FIELDS}}}",
+            "limit": 500,
+        },
+        meta_account_id,
+    )
+    itens = []
+    for adset in data.get("data", []):
+        if adset.get("effective_status") != "ACTIVE":
+            continue
+        campaign = adset.get("campaign") or {}
+        itens.append(
+            {
+                "adset_id": adset.get("id"),
+                "adset_nome": adset.get("name"),
+                "campanha_nome": campaign.get("name", ""),
+                "otimizacao": adset.get("optimization_goal"),
+                "assinatura": _construir_assinatura_publico(adset.get("targeting") or {}),
+            }
+        )
+    return itens
+
+
+def _campaign_matches_filter(campaign_filter: str | None, campaign_name: str) -> bool:
+    """Mesma regra de app.sync._brand_matches_campaign, duplicada aqui (não importada, pra
+    não criar import circular: sync.py já importa este módulo) — "contém o texto", não
+    "começa com": um prefixo exato quebrou silenciosamente a conta de Dourados quando a
+    convenção de nome das campanhas mudou (ver incidente de 15/09/2026)."""
+    if not campaign_filter:
+        return True
+    if campaign_filter.startswith("!"):
+        return campaign_filter[1:].lower() not in campaign_name.lower()
+    return campaign_filter.lower() in campaign_name.lower()
+
+
+def get_active_campaign_names(meta_account_id: str, campaign_filter: str | None = None) -> list[dict]:
+    """Campanhas com pelo menos um conjunto ATIVO agora — alimenta o seletor do diagnóstico
+    de campanha no painel (buscado ao vivo, na hora que alguém abre, não fica em cache).
+    Aplica o mesmo `campaign_filter` usado no resto do sistema pra separar contas
+    compartilhadas entre marcas (ver _campaign_matches_filter)."""
+    data = _get(
+        f"{meta_account_id}/adsets",
+        {"fields": "effective_status,campaign{name,objective}", "limit": 500},
+        meta_account_id,
+    )
+    campanhas: dict[str, str] = {}
+    for adset in data.get("data", []):
+        if adset.get("effective_status") != "ACTIVE":
+            continue
+        campaign = adset.get("campaign") or {}
+        nome = campaign.get("name")
+        if not nome:
+            continue
+        if not _campaign_matches_filter(campaign_filter, nome):
+            continue
+        campanhas[nome] = campaign.get("objective") or ""
+    return [{"nome": nome, "objetivo": objetivo} for nome, objetivo in sorted(campanhas.items())]
+
+
+def get_campaign_diagnostico(meta_account_id: str, campaign_name: str, days: int = 30) -> dict:
+    """Diagnóstico completo de UMA campanha, buscado ao vivo (sem cache): estrutura dos
+    conjuntos (orçamento, público, destino, fase de aprendizado), desempenho diário
+    (gasto/leads/CPL/CTR/CPM/frequência/alcance) e ranking de anúncios no período.
+
+    É a mesma lógica usada pra investigar a "BMW AUTO | LEAD | SETEMBRO | CG" na mão (ver
+    conversa de 15/09/2026), só generalizada pra qualquer campanha — por isso sob demanda:
+    é pesado demais (adsets + insights diário + ads, 3 chamadas) pra rodar em todas as
+    campanhas de todas as contas todo dia sem ninguém pedir.
+    """
+    since = (date.today() - timedelta(days=days)).isoformat()
+    until = date.today().isoformat()
+    # Filtra pelo nome da campanha DIRETO na API (não busca tudo e filtra em Python): contas
+    # compartilhadas entre marcas (ex.: BMW Auto + Motorrad + MINI numa só) têm adsets/ads
+    # suficientes pra estourar "Please reduce the amount of data you're asking for" quando se
+    # pede campos pesados (targeting, learning_stage_info) de TODOS de uma vez.
+    filtro_campanha = f'[{{"field":"campaign.name","operator":"EQUAL","value":"{campaign_name}"}}]'
+
+    adsets_data = _get(
+        f"{meta_account_id}/adsets",
+        {
+            "fields": "id,name,effective_status,daily_budget,destination_type,optimization_goal,"
+            f"learning_stage_info,targeting{{{TARGETING_FIELDS}}},"
+            "campaign{name,objective,daily_budget,effective_status}",
+            "filtering": filtro_campanha,
+            "limit": 500,
+        },
+        meta_account_id,
+    )
+    adsets = adsets_data.get("data", [])
+    if not adsets:
+        raise RuntimeError(f"Campanha '{campaign_name}' não encontrada ou sem conjuntos configurados.")
+
+    eh_conversa = any(a.get("destination_type") in DESTINOS_CONVERSA for a in adsets)
+    campaign_info = adsets[0].get("campaign") or {}
+
+    # Públicos sobrepostos DENTRO desta campanha (mesma assinatura + mesma otimização, ambos
+    # ativos) — pra marcar na tabela quais conjuntos competem entre si. Não olha campanhas
+    # IRMÃS da mesma marca de propósito: manter isso local ao que já foi buscado aqui evita
+    # uma chamada extra só pra popular um aviso secundário do diagnóstico (o alerta de sino,
+    # gerar_alertas_publico_sobreposto, já cobre a marca inteira).
+    grupos_publico: dict[tuple, list[str]] = {}
+    for a in adsets:
+        if a.get("effective_status") != "ACTIVE":
+            continue
+        chave = (_construir_assinatura_publico(a.get("targeting") or {}), a.get("optimization_goal"))
+        grupos_publico.setdefault(chave, []).append(a.get("name"))
+
+    conjuntos = []
+    orcamento_total = 0.0
+    orcamento_ja_contado_cbo = False
+    for a in adsets:
+        camp = a.get("campaign") or {}
+        orcamento_campanha = camp.get("daily_budget")
+        if orcamento_campanha is not None:
+            orcamento_adset = float(orcamento_campanha) / 100  # CBO: valor é da campanha inteira, repetido aqui só informativamente
+            if a.get("effective_status") == "ACTIVE" and not orcamento_ja_contado_cbo:
+                orcamento_total += orcamento_adset
+                orcamento_ja_contado_cbo = True
+        else:
+            orcamento_adset = float(a.get("daily_budget") or 0) / 100  # ABO: cada conjunto tem o seu
+            if a.get("effective_status") == "ACTIVE":
+                orcamento_total += orcamento_adset
+        geo = (a.get("targeting") or {}).get("geo_locations") or {}
+        targeting = a.get("targeting") or {}
+        chave = (_construir_assinatura_publico(targeting), a.get("optimization_goal"))
+        outros_no_grupo = [nome for nome in grupos_publico.get(chave, []) if nome != a.get("name")]
+        conjuntos.append(
+            {
+                "nome": a.get("name"),
+                "status": a.get("effective_status"),
+                "destino": a.get("destination_type"),
+                "otimizacao": a.get("optimization_goal"),
+                "orcamentoDiario": orcamento_adset,
+                "orcamentoTipo": "cbo" if orcamento_campanha is not None else "abo",
+                "cidadesAlvo": [c.get("name") for c in geo.get("cities", [])],
+                "idadeMin": targeting.get("age_min"),
+                "idadeMax": targeting.get("age_max"),
+                "faseAprendizado": (a.get("learning_stage_info") or {}).get("status"),
+                "publicoSobrepostoCom": outros_no_grupo if a.get("effective_status") == "ACTIVE" else [],
+            }
+        )
+
+    insights_data = _get(
+        f"{meta_account_id}/insights",
+        {
+            "level": "campaign",
+            "time_increment": 1,
+            "time_range": f'{{"since":"{since}","until":"{until}"}}',
+            "filtering": filtro_campanha,
+            "fields": "date_start,spend,actions,ctr,cpm,frequency,reach",
+            "limit": 500,
+        },
+        meta_account_id,
+    )
+    diario = []
+    total_gasto = 0.0
+    total_leads = 0
+    for row in sorted(insights_data.get("data", []), key=lambda r: r["date_start"]):
+        leads_formulario, leads_whatsapp = _contar_leads(row.get("actions"), eh_conversa)
+        leads = leads_formulario + leads_whatsapp
+        gasto = float(row.get("spend", 0) or 0)
+        total_gasto += gasto
+        total_leads += leads
+        diario.append(
+            {
+                "data": row["date_start"],
+                "gasto": gasto,
+                "leads": leads,
+                "ctr": float(row.get("ctr", 0) or 0),
+                "cpm": float(row.get("cpm", 0) or 0),
+                "frequencia": float(row.get("frequency", 0) or 0),
+                "alcance": int(float(row.get("reach", 0) or 0)),
+            }
+        )
+
+    ads_data = _get(
+        f"{meta_account_id}/ads",
+        {
+            "fields": "name,effective_status,campaign{name},"
+            f'insights.time_range({{"since":"{since}","until":"{until}"}}){{spend,actions,ctr}}',
+            "filtering": filtro_campanha,
+            "limit": 200,
+        },
+        meta_account_id,
+    )
+    anuncios = []
+    for ad in ads_data.get("data", []):
+        linhas_insight = (ad.get("insights") or {}).get("data", [])
+        row = linhas_insight[0] if linhas_insight else {}
+        leads_formulario, leads_whatsapp = _contar_leads(row.get("actions"), eh_conversa)
+        anuncios.append(
+            {
+                "nome": ad.get("name"),
+                "status": ad.get("effective_status"),
+                "gasto": float(row.get("spend", 0) or 0),
+                "leads": leads_formulario + leads_whatsapp,
+                "ctr": float(row.get("ctr", 0) or 0),
+            }
+        )
+    anuncios.sort(key=lambda a: a["gasto"], reverse=True)
+
+    return {
+        "campanha": campaign_name,
+        "objetivo": campaign_info.get("objective"),
+        "statusCampanha": campaign_info.get("effective_status"),
+        "orcamentoTotalDiario": orcamento_total,
+        "conjuntos": conjuntos,
+        "diario": diario,
+        "anuncios": anuncios,
+        "totalGasto": total_gasto,
+        "totalLeads": total_leads,
+    }

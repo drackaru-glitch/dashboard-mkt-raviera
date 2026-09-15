@@ -44,6 +44,8 @@ from app.models import (
     InstagramPostMetric,
     InstagramStatsCache,
     MediaComentarioCache,
+    MetaCidadeCache,
+    MetaRegionCache,
     SaldoCache,
     TokenSaude,
 )
@@ -54,7 +56,7 @@ if not META_DEMO_MODE:
 if not GOOGLE_ADS_DEMO_MODE:
     from app import google_ads_client
 
-from app import geocoding, instagram_client, media_cache, news_client, social_client
+from app import geocoding, instagram_client, media_cache, news_client, notificacoes, social_client
 
 _sync_lock = threading.Lock()
 _sync_started_at: float | None = None
@@ -89,6 +91,8 @@ class SyncEmAndamento(Exception):
 
 
 def _brand_matches_campaign(brand: Brand, campaign_name: str) -> bool:
+    # Mesma regra duplicada em meta_client._campaign_matches_filter (import circular impede
+    # reaproveitar uma só função) — mudou aqui, muda lá também.
     if not brand.campaign_filter:
         return True  # conta não compartilhada: tudo pertence à única marca
     if brand.campaign_filter.startswith("!"):
@@ -97,7 +101,14 @@ def _brand_matches_campaign(brand: Brand, campaign_name: str) -> bool:
         # vez de exigir um prefixo exato (os nomes reais nem sempre são consistentes), só
         # exclui quem contém o texto informado e aceita todo o resto da conta.
         return brand.campaign_filter[1:].lower() not in campaign_name.lower()
-    return campaign_name.lower().startswith(brand.campaign_filter.lower())
+    # Contém, não "começa com": só prefixo quebrou silenciosamente pra BMW Auto Dourados e
+    # Motorrad Dourados quando quem gerencia as campanhas da Dourados mudou a convenção de
+    # nome (deixou de por "BMW AUTO DDS"/"MOTORRAD DDS" logo no início) — 46 dias (01/08 a
+    # 15/09/2026) com investimento, lead, orçamento real, mapa de calor e criativo ZERADOS
+    # pras duas marcas, sem erro nenhum aparecer, porque a query só filtrava e não sobrava
+    # nada. As outras 6 marcas que dividem conta já batiam com prefixo OU substring (uma
+    # implica a outra), então essa troca não muda nada pra elas.
+    return brand.campaign_filter.lower() in campaign_name.lower()
 
 
 def _demo_row_for_brand(brand: Brand, day: date, rng: random.Random) -> dict:
@@ -124,6 +135,14 @@ def _buscar_meta_account(meta_account_id: str, days: int, since_criativos: str, 
         "saldo": meta_client.get_ad_account_balance(meta_account_id),
         "insights": meta_client.get_daily_insights(meta_account_id, days=days, destinos=destinos),
         "ads_daily": meta_client.get_ads_daily(meta_account_id, since_criativos, until_criativos, destinos=destinos),
+        "orcamentos": meta_client.get_campaign_orcamentos(meta_account_id),
+        # Janela própria de 30 dias, independente de `days` (que agora é só 7, ver
+        # DIAS_JANELA_SYNC_PADRAO) — padrão geográfico não precisa de frescor diário, e uma
+        # janela maior estabiliza melhor quais estados realmente concentram resultado.
+        "regioes": meta_client.get_region_performance(meta_account_id, days=30, destinos=destinos),
+        "cidades_configuradas": meta_client.get_campaign_cidades(meta_account_id),
+        "aprendizado": meta_client.get_learning_status(meta_account_id),
+        "targeting_signatures": meta_client.get_targeting_signatures(meta_account_id),
     }
 
 
@@ -182,6 +201,82 @@ def _sync_meta_account(
                 _upsert_daily_metric(db, brand.id, day, row, fonte="meta")
                 dias_sincronizados += 1
 
+    # --- orçamento diário REAL (o que está configurado agora no Meta, não o digitado à mão) ---
+    if META_DEMO_MODE:
+        rng_orc = random.Random(account.id * 911)
+        for brand in account_brands:
+            # gira em torno do planejado (±20%) só pra ter algo plausível pra mostrar sem token
+            fator = 0.8 + rng_orc.random() * 0.4
+            brand.orcamento_diario_real = round((brand.diario_esperado_meta or 50) * fator, 2)
+            brand.orcamento_atualizado_em = datetime.utcnow()
+    else:
+        orcamentos = dados["orcamentos"]
+        # `effective_status: ACTIVE` no conjunto NÃO garante que ele está gastando de verdade —
+        # achamos, ao investigar uma divergência real (Nissan Dourados: R$241 calculado vs
+        # R$105 de verdade), duas campanhas de meses passados ("...JULHO", "...MARÇO") ainda
+        # com esse status e orçamento configurado, mas ZERO gasto nos últimos dias: ninguém
+        # pausou, mas pararam de rodar. Cruza com o gasto recente (mesmos `insights` já
+        # buscados pra leads/gasto, nenhuma chamada extra) e só conta campanha que gastou algo
+        # de verdade na janela de sincronização.
+        campanhas_com_gasto_recente = {r["campaign_name"] for r in dados["insights"] if r["gasto"] > 0}
+        for brand in account_brands:
+            total = sum(
+                valor
+                for nome, valor in orcamentos.items()
+                if nome in campanhas_com_gasto_recente and _brand_matches_campaign(brand, nome)
+            )
+            brand.orcamento_diario_real = total
+            brand.orcamento_atualizado_em = datetime.utcnow()
+
+    # --- mapa de calor por estado + cidades configuradas (pra abrir ao clicar num estado) ---
+    if META_DEMO_MODE:
+        rng_geo = random.Random(account.id * 733)
+        ESTADOS_DEMO = ["Mato Grosso do Sul", "Acre", "Rondônia"]
+        for brand in account_brands:
+            estado = ESTADOS_DEMO[brand.id % len(ESTADOS_DEMO)]
+            _replace_meta_regioes(db, brand.id, [{"regiao": estado, "gasto": round(rng_geo.uniform(200, 900), 2), "leads": rng_geo.randint(5, 40)}])
+            _replace_meta_cidades(db, brand.id, [{"regiao": estado, "cidade": "Cidade Demonstração"}])
+    else:
+        regioes_conta = dados["regioes"]
+        cidades_conta = dados["cidades_configuradas"]
+        for brand in account_brands:
+            agregado_regiao: dict[str, dict] = {}
+            for r in regioes_conta:
+                if not _brand_matches_campaign(brand, r["campaign_name"]):
+                    continue
+                acc = agregado_regiao.setdefault(r["regiao"], {"regiao": r["regiao"], "gasto": 0.0, "leads": 0})
+                acc["gasto"] += r["gasto"]
+                acc["leads"] += r["leads"]
+            _replace_meta_regioes(db, brand.id, list(agregado_regiao.values()))
+
+            cidades_marca: dict[tuple, dict] = {}
+            for nome_campanha, cidades in cidades_conta.items():
+                if not _brand_matches_campaign(brand, nome_campanha):
+                    continue
+                for c in cidades:
+                    cidades_marca[(c["regiao"], c["cidade"])] = c
+            _replace_meta_cidades(db, brand.id, list(cidades_marca.values()))
+
+    # --- fase de aprendizado travada ---
+    # Não simulado em modo demo (não há learning_stage_info sem token real) — sem dado, sem
+    # alerta, o que é o comportamento correto (nenhuma conta demo "trava" de verdade).
+    if not META_DEMO_MODE:
+        aprendizado_conta = dados["aprendizado"]
+        for brand in account_brands:
+            itens_marca = [a for a in aprendizado_conta if _brand_matches_campaign(brand, a["campanha_nome"])]
+            if itens_marca:
+                notificacoes.gerar_alertas_aprendizado_travado(db, brand, itens_marca)
+
+    # --- públicos sobrepostos ---
+    # Mesma justificativa de não simular em demo: sem `targeting` real não existe sobreposição
+    # de verdade pra detectar.
+    if not META_DEMO_MODE:
+        assinaturas_conta = dados["targeting_signatures"]
+        for brand in account_brands:
+            itens_marca = [a for a in assinaturas_conta if _brand_matches_campaign(brand, a["campanha_nome"])]
+            if len(itens_marca) >= 2:
+                notificacoes.gerar_alertas_publico_sobreposto(db, brand, itens_marca)
+
     # --- histórico diário de criativos (pra recalcular o top 3 por período) ---
     # Uma chamada só por conta (não por marca) — contas com várias marcas (ex.: BMW
     # Auto Campo Grande = 3 marcas) chamavam a mesma listagem de anúncios à toa,
@@ -198,7 +293,16 @@ def _sync_meta_account(
     return dias_sincronizados
 
 
-def sync_all(db: Session, days: int = 30) -> dict:
+# O painel já guarda o histórico de gasto/lead pra sempre em DailyMetric (nada ali é apagado —
+# é o que sustenta comparativo mês a mês por até 2 anos). Re-pedir 30 dias ao Meta em TODA
+# sincronização (2x por dia + cada clique em "Atualizar") só faz sentido pros dias que ainda
+# podem mudar: o Meta reprocessa atribuição por alguns dias após o fato, então um dia com mais
+# de uma semana já assentou e pedir de novo é desperdício de tempo de sincronização e de limite
+# de chamada da API. Dias mais velhos que isso já estão certos no banco — não tocamos neles.
+DIAS_JANELA_SYNC_PADRAO = 7
+
+
+def sync_all(db: Session, days: int = DIAS_JANELA_SYNC_PADRAO) -> dict:
     global _sync_started_at
     if not _sync_lock.acquire(blocking=False):
         presa_ha_muito_tempo = _sync_started_at is not None and (time.monotonic() - _sync_started_at) > SYNC_TIMEOUT_SECONDS
@@ -222,7 +326,7 @@ def sync_all(db: Session, days: int = 30) -> dict:
         _sync_lock.release()
 
 
-def _sync_all(db: Session, days: int = 30) -> dict:
+def _sync_all(db: Session, days: int = DIAS_JANELA_SYNC_PADRAO) -> dict:
     brands = db.query(Brand).filter(Brand.ad_account_id.isnot(None)).all()
     accounts = db.query(AdAccount).all()
     accounts_by_id = {a.id: a for a in accounts}
@@ -293,6 +397,28 @@ def _sync_all(db: Session, days: int = 30) -> dict:
             print(f"[sync] falha ao gravar conta Meta '{account.nome}' ({account.meta_account_id}): {exc}")
 
     try:
+        alertas_saldo = notificacoes.gerar_alertas_saldo(db)
+        alertas_gasto = notificacoes.gerar_alertas_gasto_anomalo(db)
+        alertas_leads = notificacoes.gerar_alertas_queda_leads(db)
+        alertas_performance = notificacoes.gerar_alertas_alta_performance(db)
+        alertas_subutilizado = notificacoes.gerar_alertas_orcamento_subutilizado(db)
+        alertas_orcamento = notificacoes.gerar_alertas_orcamento_zerado(db)
+        db.commit()
+        total_alertas = (
+            alertas_saldo + alertas_gasto + alertas_leads + alertas_performance + alertas_subutilizado + alertas_orcamento
+        )
+        if total_alertas:
+            print(
+                f"[sync] notificações geradas: {alertas_saldo} de saldo crítico, {alertas_gasto} de gasto fora "
+                f"da curva, {alertas_leads} de queda de leads, {alertas_performance} de alta performance, "
+                f"{alertas_subutilizado} de orçamento subutilizado, {alertas_orcamento} de orçamento zerado"
+            )
+    except Exception as exc:
+        db.rollback()
+        falhas.append(f"Notificações: {exc}")
+        print(f"[sync] falha ao gerar notificações: {exc}")
+
+    try:
         contas_instagram, dados_instagram = _sync_instagram(db, days)
         db.commit()
     except Exception as exc:
@@ -330,6 +456,10 @@ def _sync_all(db: Session, days: int = 30) -> dict:
 
     try:
         tokens_conferidos = _sync_tokens(db)
+        alertas_token = notificacoes.gerar_alertas_token(db)
+        db.commit()
+        if alertas_token:
+            print(f"[sync] notificações geradas: {alertas_token} de saúde de token")
     except Exception as exc:
         db.rollback()
         falhas.append(f"Tokens: {exc}")
@@ -344,6 +474,16 @@ def _sync_all(db: Session, days: int = 30) -> dict:
         falhas.append(f"Notícias: {exc}")
         print(f"[sync] falha ao sincronizar notícias: {exc}")
         noticias = 0
+
+    # Por último de propósito: só agora `falhas` tem tudo que deu errado nesta sincronização
+    # inteira (Meta, Instagram, Google, funil, tokens, notícias).
+    try:
+        if notificacoes.gerar_alerta_falha_sync(db, falhas):
+            db.commit()
+            print("[sync] notificação de falha na sincronização gerada")
+    except Exception as exc:
+        db.rollback()
+        print(f"[sync] falha ao gerar notificação de falha de sincronização: {exc}")
 
     return {
         "contas_sincronizadas": synced_accounts,
@@ -1073,6 +1213,37 @@ def _replace_google_keywords(db: Session, brand_id: int, keywords: list[dict]):
         cache.cliques = item["cliques"]
         cache.conversoes = item["conversoes"]
         cache.atualizado_em = datetime.utcnow()
+    for leftover in existing.values():
+        db.delete(leftover)
+
+
+def _replace_meta_regioes(db: Session, brand_id: int, regioes: list[dict]):
+    """`regioes`: lista de {"regiao", "gasto", "leads"} já somada por estado pra essa marca."""
+    existing = {r.regiao: r for r in db.query(MetaRegionCache).filter(MetaRegionCache.brand_id == brand_id).all()}
+    for item in regioes:
+        nome = item["regiao"]
+        cache = existing.pop(nome, None)
+        if not cache:
+            cache = MetaRegionCache(brand_id=brand_id, regiao=nome)
+            db.add(cache)
+        cache.gasto = item["gasto"]
+        cache.leads = item["leads"]
+        cache.atualizado_em = datetime.utcnow()
+    for leftover in existing.values():
+        db.delete(leftover)
+
+
+def _replace_meta_cidades(db: Session, brand_id: int, cidades: list[dict]):
+    """`cidades`: lista de {"regiao", "cidade"} — cidades configuradas nos conjuntos ativos
+    dessa marca agora, já deduplicada."""
+    existing = {(c.regiao, c.cidade): c for c in db.query(MetaCidadeCache).filter(MetaCidadeCache.brand_id == brand_id).all()}
+    for item in cidades:
+        chave = (item["regiao"], item["cidade"])
+        cache = existing.pop(chave, None)
+        if not cache:
+            db.add(MetaCidadeCache(brand_id=brand_id, regiao=item["regiao"], cidade=item["cidade"]))
+        else:
+            cache.atualizado_em = datetime.utcnow()
     for leftover in existing.values():
         db.delete(leftover)
 
