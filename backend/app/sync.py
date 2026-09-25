@@ -56,7 +56,7 @@ if not META_DEMO_MODE:
 if not GOOGLE_ADS_DEMO_MODE:
     from app import google_ads_client
 
-from app import geocoding, instagram_client, media_cache, news_client, notificacoes, social_client
+from app import geocoding, historico, instagram_client, media_cache, news_client, notificacoes, social_client
 
 _sync_lock = threading.Lock()
 _sync_started_at: float | None = None
@@ -132,6 +132,7 @@ def _buscar_meta_account(meta_account_id: str, days: int, since_criativos: str, 
     # que passaram a rodar Click-to-WhatsApp dentro de campanha OUTCOME_LEADS.
     destinos = meta_client.get_campaign_destinos(meta_account_id)
     return {
+        "destinos": destinos,
         "saldo": meta_client.get_ad_account_balance(meta_account_id),
         "insights": meta_client.get_daily_insights(meta_account_id, days=days, destinos=destinos),
         "ads_daily": meta_client.get_ads_daily(meta_account_id, since_criativos, until_criativos, destinos=destinos),
@@ -176,6 +177,7 @@ def _sync_meta_account(
     cache.saldo = saldo
     cache.moeda = moeda
     cache.atualizado_em = datetime.utcnow()
+    historico.gravar_saldo_historico(db, account, saldo)
 
     # --- gasto/leads diários ---
     if META_DEMO_MODE:
@@ -200,6 +202,14 @@ def _sync_meta_account(
                 day = datetime.strptime(data_str, "%Y-%m-%d").date()
                 _upsert_daily_metric(db, brand.id, day, row, fonte="meta")
                 dias_sincronizados += 1
+        historico.gravar_campanhas_conta(
+            db, account_brands, insights, dados.get("destinos", {}), dados["orcamentos"], _brand_matches_campaign
+        )
+        sem_marca: dict[str, float] = {}
+        for r in insights:
+            if r["gasto"] > 0 and not any(_brand_matches_campaign(br, r["campaign_name"]) for br in account_brands):
+                sem_marca[r["campaign_name"]] = sem_marca.get(r["campaign_name"], 0.0) + r["gasto"]
+        notificacoes.gerar_alerta_gasto_sem_marca(db, account, account_brands, sem_marca)
 
     # --- orçamento diário REAL (o que está configurado agora no Meta, não o digitado à mão) ---
     if META_DEMO_MODE:
@@ -417,6 +427,16 @@ def _sync_all(db: Session, days: int = DIAS_JANELA_SYNC_PADRAO) -> dict:
         db.rollback()
         falhas.append(f"Notificações: {exc}")
         print(f"[sync] falha ao gerar notificações: {exc}")
+
+    try:
+        relatorios_criados = historico.garantir_snapshots(db, dados_frescos=synced_accounts > 0)
+        db.commit()
+        if relatorios_criados:
+            print(f"[sync] {relatorios_criados} relatório(s) diário(s) gravado(s) no histórico")
+    except Exception as exc:
+        db.rollback()
+        falhas.append(f"Histórico diário: {exc}")
+        print(f"[sync] falha ao gravar relatório diário: {exc}")
 
     try:
         contas_instagram, dados_instagram = _sync_instagram(db, days)

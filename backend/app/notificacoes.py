@@ -111,37 +111,75 @@ def _fmt_brl(valor: float) -> str:
     return "R$ " + texto.replace(",", "_").replace(".", ",").replace("_", ".")
 
 
-def _status_runway(saldo_atual: float, diario_esperado: float) -> str:
-    if not diario_esperado:
-        return "semDados"
-    dias = saldo_atual / diario_esperado
-    if dias <= RUNWAY_CRITICO_DIAS:
-        return "critico"
-    return "ok"
-
-
 def gerar_alertas_saldo(db: Session) -> int:
-    """Notifica só na TRANSIÇÃO pra crítico — sincronizar de novo com a marca continuando
-    crítica não deve gerar uma notificação nova a cada vez (rodaria 2x por dia sem parar)."""
+    """Notifica só na TRANSIÇÃO pra crítico — sincronizar de novo com a conta continuando crítica
+    não deve gerar uma notificação nova a cada vez (rodaria 2x por dia sem parar).
+
+    É por CONTA, não por marca: o saldo é da conta, então BMW Auto + Motorrad + MINI viravam três
+    avisos iguais, e o dia de fôlego era calculado só com o orçamento de uma delas (ver
+    app.runway). Sai uma notificação por conta, presa à primeira marca dela."""
+    from app import runway  # import tardio: runway importa models, e este módulo é importado cedo
+
     criadas = 0
-    brands = db.query(Brand).filter(Brand.ad_account_id.isnot(None)).all()
-    for brand in brands:
-        cache = db.query(SaldoCache).filter(SaldoCache.ad_account_id == brand.ad_account_id).first()
-        saldo_atual = cache.saldo if cache else 0
-        status = _status_runway(saldo_atual, brand.diario_esperado_meta or 0)
-        if status == "critico" and brand.ultimo_status_saldo != "critico":
-            dias = round(saldo_atual / brand.diario_esperado_meta, 1) if brand.diario_esperado_meta else 0
-            db.add(
-                Notificacao(
-                    tipo="saldo_critico",
-                    titulo=f"Saldo crítico: {brand.nome}",
-                    mensagem=f"Saldo atual de {_fmt_brl(saldo_atual)} dura só ~{dias} dia(s) no ritmo de gasto planejado.",
-                    brand_id=brand.id,
-                )
+    for conta in runway.calcular_por_conta(db).values():
+        marcas = sorted(conta["marcas"], key=lambda b: b.id)
+        dias = conta["dias"]
+        critico = dias is not None and dias <= RUNWAY_CRITICO_DIAS
+        ja_estava_critico = all(b.ultimo_status_saldo == "critico" for b in marcas)
+        if critico and not ja_estava_critico:
+            nome_conta = marcas[0].ad_account.nome if marcas[0].ad_account else marcas[0].nome
+            titulo = f"Saldo crítico: {nome_conta}" if len(marcas) > 1 else f"Saldo crítico: {marcas[0].nome}"
+            mensagem = (
+                f"Saldo de {_fmt_brl(conta['saldo'])} dura ~{round(dias, 1)} dia(s) no ritmo "
+                f"{'real' if conta['ritmoFonte'] == 'real' else 'planejado'} de gasto "
+                f"({_fmt_brl(conta['ritmo'])}/dia)."
             )
+            if conta["faltaAteFimDoMes"] > 0:
+                mensagem += f" Faltam {_fmt_brl(conta['faltaAteFimDoMes'])} pra cobrir até o fim do mês."
+            if len(marcas) > 1:
+                mensagem += " Conta compartilhada por: " + ", ".join(b.nome for b in marcas) + "."
+            db.add(Notificacao(tipo="saldo_critico", titulo=titulo, mensagem=mensagem, brand_id=marcas[0].id))
             criadas += 1
-        brand.ultimo_status_saldo = status
+        for b in marcas:
+            b.ultimo_status_saldo = "critico" if critico else ("ok" if dias is not None else "semDados")
     return criadas
+
+
+# Gasto numa campanha que NENHUMA marca da conta reivindica (o filtro de campanha de cada marca
+# não casa com o nome dela) some do painel sem erro nenhum. Foi assim com a Motorrad Dourados: o
+# filtro "BMW MOTORRAD DOURADOS" não casava com "LEAD | MOTORRAD | AGOSTO", e R$ 233 de setembro
+# ficaram de fora. Abaixo disso é ruído (campanha de teste, centavos de alcance).
+GASTO_SEM_MARCA_MINIMO = 30.0
+
+
+def gerar_alerta_gasto_sem_marca(db: Session, conta, marcas: list, gasto_por_campanha_sem_marca: dict[str, float]) -> int:
+    """`gasto_por_campanha_sem_marca`: campanha -> gasto na janela de sincronização, só das que
+    nenhuma marca da conta reivindicou. Uma notificação por conta por dia."""
+    total = sum(gasto_por_campanha_sem_marca.values())
+    if total < GASTO_SEM_MARCA_MINIMO or not marcas:
+        return 0
+    titulo = f"Gasto sem marca: {conta.nome}"
+    inicio_hoje = datetime.combine(date.today(), datetime.min.time())
+    if (
+        db.query(Notificacao)
+        .filter(Notificacao.tipo == "gasto_sem_marca", Notificacao.titulo == titulo, Notificacao.criado_em >= inicio_hoje)
+        .first()
+    ):
+        return 0
+    maiores = sorted(gasto_por_campanha_sem_marca.items(), key=lambda kv: -kv[1])[:3]
+    exemplos = "; ".join(f"\"{nome}\" ({_fmt_brl(g)})" for nome, g in maiores)
+    db.add(
+        Notificacao(
+            tipo="gasto_sem_marca",
+            titulo=titulo,
+            mensagem=(
+                f"{_fmt_brl(total)} gastos nos últimos dias em campanha que nenhuma marca da conta reivindica "
+                f"e por isso não aparecem no painel: {exemplos}. Ajuste o filtro de campanha da marca certa em Configuração."
+            ),
+            brand_id=min(marcas, key=lambda b: b.id).id,
+        )
+    )
+    return 1
 
 
 def gerar_alertas_gasto_anomalo(db: Session) -> int:

@@ -66,6 +66,9 @@ def update_ad_account(account_id: int, payload: AdAccountIn, db: Session = Depen
         raise HTTPException(status_code=404, detail="Conta não encontrada.")
     account.meta_account_id = payload.meta_account_id
     account.nome = payload.nome
+    account.billing_business_id = payload.billing_business_id
+    account.billing_asset_id = payload.billing_asset_id
+    account.billing_payment_account_id = payload.billing_payment_account_id
     db.commit()
     db.refresh(account)
     return account
@@ -190,6 +193,8 @@ def update_brand(brand_id: int, payload: BrandIn, db: Session = Depends(get_db))
     brand = db.query(Brand).filter(Brand.id == brand_id).first()
     if not brand:
         raise HTTPException(status_code=404, detail="Marca não encontrada.")
+    if db.query(Brand).filter(Brand.nome == payload.nome, Brand.id != brand_id).first():
+        raise HTTPException(status_code=400, detail="Já existe outra marca com esse nome.")
     for field, value in payload.model_dump().items():
         setattr(brand, field, value)
     db.commit()

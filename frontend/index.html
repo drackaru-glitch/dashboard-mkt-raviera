@@ -54,6 +54,12 @@
     100% { opacity: 0; transform: scale(0.95); }
   }
   .turbo-banner { animation: turboBannerIn 4.5s cubic-bezier(0.16, 1, 0.3, 1) both; }
+
+  /* --- Easter egg 2: ↓ ↓ ↑ ↑ → ← → ← A B ("estrelas cadentes") -----------
+     Estrelas cruzando a tela em diagonal, contínuas enquanto o vídeo roda (loop infinito, não
+     uma rajada única como o Modo Turbo — aqui quem fecha é o vídeo acabando, não um timer). */
+  @keyframes estrelaCair { 0% { transform: translate(0, 0) rotate(0deg); opacity: 0; } 8% { opacity: 1; } 92% { opacity: 1; } 100% { transform: translate(38vw, 38vh) rotate(8deg); opacity: 0; } }
+  .estrela-cadente { position: absolute; animation-name: estrelaCair; animation-timing-function: linear; animation-iteration-count: infinite; pointer-events: none; }
 </style>
 </head>
 <body>
@@ -216,6 +222,7 @@ const IconImage = (p) => <Icon {...p} path={<><rect x="3" y="3" width="18" heigh
 const IconLock = (p) => <Icon {...p} path={<><rect x="3" y="11" width="18" height="11" rx="2" /><path d="M7 11V7a5 5 0 0110 0v4" /></>} />;
 const IconLogOut = (p) => <Icon {...p} path={<><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4" /><polyline points="16 17 21 12 16 7" /><line x1="21" y1="12" x2="9" y2="12" /></>} />;
 const IconAward = (p) => <Icon {...p} path={<><circle cx="12" cy="8" r="6" /><path d="M8.21 13.89L7 23l5-3 5 3-1.21-9.12" /></>} />;
+const IconPencil = (p) => <Icon {...p} path={<><path d="M12 20h9" /><path d="M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1 1-4 12.5-12.5z" /></>} />;
 const IconTrash = (p) => <Icon {...p} path={<><polyline points="3 6 5 6 21 6" /><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6" /><path d="M10 11v6" /><path d="M14 11v6" /><path d="M9 6V4a2 2 0 012-2h2a2 2 0 012 2v2" /></>} />;
 const IconInstagram = (p) => <Icon {...p} path={<><rect x="2" y="2" width="20" height="20" rx="5" ry="5" /><path d="M16 11.37A4 4 0 1112.63 8 4 4 0 0116 11.37z" /><line x1="17.5" y1="6.5" x2="17.51" y2="6.5" /></>} />;
 const IconHeart = (p) => <Icon {...p} path={<path d="M20.84 4.61a5.5 5.5 0 00-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 00-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 000-7.78z" />} />;
@@ -552,6 +559,174 @@ function SortableTh({ label, sortKey, sortConfig, onSort }) {
     </th>
   );
 }
+const dataParaIso = (d) => d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+
+// Tabela por marca do modo "Comparativo". Só é montada nesse modo, então a busca no histórico
+// (relatórios diários congelados) só acontece quando a pessoa escolhe Comparativo. Compara só
+// DIAS FECHADOS (até ontem) — hoje está no meio e ainda não tem relatório gravado; o período
+// anterior é cortado no mesmo número de dias, pra não comparar recorte parcial com mês cheio.
+function ComparativoMarcas({ token, range, prevRange, brandsToShow, dark, cardBg, mutedText, verInvestimento }) {
+  const [estado, setEstado] = useState({ carregando: true, erro: "", atual: [], anterior: [] });
+  const [sortConfig, setSortConfig] = useState({ key: "gastoAtual", dir: "desc" });
+
+  const janela = useMemo(() => {
+    const hoje = new Date(); hoje.setHours(0, 0, 0, 0);
+    const ontem = new Date(hoje); ontem.setDate(ontem.getDate() - 1);
+    const fimAtual = range.end < ontem ? range.end : ontem;
+    if (fimAtual < range.start) return null;
+    const dias = Math.round((fimAtual - range.start) / 86400000) + 1;
+    const fimAnt = new Date(prevRange.start); fimAnt.setDate(fimAnt.getDate() + dias - 1);
+    return { iniAtual: range.start, fimAtual, iniAnt: prevRange.start, fimAnt: fimAnt < prevRange.end ? fimAnt : prevRange.end, dias };
+  }, [range, prevRange]);
+  const chave = janela ? [janela.iniAtual, janela.fimAtual, janela.iniAnt, janela.fimAnt].map(dataParaIso).join("|") : "";
+
+  useEffect(() => {
+    if (!janela) { setEstado({ carregando: false, erro: "", atual: [], anterior: [] }); return; }
+    let cancelado = false;
+    setEstado((e) => ({ ...e, carregando: true, erro: "" }));
+    const url = (de, ate) => "/api/historico/snapshots?de=" + dataParaIso(de) + "&ate=" + dataParaIso(ate);
+    Promise.all([
+      authJson(url(janela.iniAtual, janela.fimAtual), token),
+      authJson(url(janela.iniAnt, janela.fimAnt), token),
+    ]).then(([atual, anterior]) => {
+      if (!cancelado) setEstado({ carregando: false, erro: "", atual, anterior });
+    }).catch((e) => {
+      if (!cancelado) setEstado({ carregando: false, erro: e.message || "Não foi possível carregar o comparativo.", atual: [], anterior: [] });
+    });
+    return () => { cancelado = true; };
+  }, [token, chave]);
+
+  const { linhas, total } = useMemo(() => {
+    const nomes = new Set(brandsToShow);
+    const mapa = {};
+    const acumular = (lista, campoGasto, campoLeads) => {
+      lista.forEach((s) => {
+        if (!nomes.has(s.marca)) return;
+        if (!mapa[s.marca]) mapa[s.marca] = { marca: s.marca, gastoAtual: 0, leadsAtual: 0, gastoAnt: 0, leadsAnt: 0 };
+        mapa[s.marca][campoGasto] += s.gasto || 0;
+        mapa[s.marca][campoLeads] += (s.leadsFormulario || 0) + (s.leadsWhatsapp || 0);
+      });
+    };
+    acumular(estado.atual, "gastoAtual", "leadsAtual");
+    acumular(estado.anterior, "gastoAnt", "leadsAnt");
+    const completar = (l) => {
+      l.cplAtual = l.leadsAtual > 0 ? l.gastoAtual / l.leadsAtual : null;
+      l.cplAnt = l.leadsAnt > 0 ? l.gastoAnt / l.leadsAnt : null;
+      l.varGasto = variacao(l.gastoAtual, l.gastoAnt);
+      l.varLeads = variacao(l.leadsAtual, l.leadsAnt);
+      l.varCpl = l.cplAtual !== null && l.cplAnt ? variacao(l.cplAtual, l.cplAnt) : null;
+      return l;
+    };
+    const lista = Object.values(mapa).map(completar);
+    const soma = lista.reduce((t, l) => ({
+      marca: "Total (" + lista.length + ")", gastoAtual: t.gastoAtual + l.gastoAtual, leadsAtual: t.leadsAtual + l.leadsAtual,
+      gastoAnt: t.gastoAnt + l.gastoAnt, leadsAnt: t.leadsAnt + l.leadsAnt,
+    }), { gastoAtual: 0, leadsAtual: 0, gastoAnt: 0, leadsAnt: 0 });
+    return { linhas: lista, total: completar(soma) };
+  }, [estado, brandsToShow]);
+
+  const ordenadas = useMemo(() => {
+    const arr = [...linhas];
+    const { key, dir } = sortConfig;
+    arr.sort((a, b) => {
+      const va = a[key], vb = b[key];
+      if (va === null || va === undefined) return 1;   // sem valor vai sempre pro fim
+      if (vb === null || vb === undefined) return -1;
+      const c = typeof va === "string" ? va.localeCompare(vb, "pt-BR") : va - vb;
+      return dir === "asc" ? c : -c;
+    });
+    return arr;
+  }, [linhas, sortConfig]);
+  function handleSort(key) {
+    setSortConfig((s) => (s.key === key ? { key, dir: s.dir === "asc" ? "desc" : "asc" } : { key, dir: key === "marca" ? "asc" : "desc" }));
+  }
+
+  const reconstruido = [...estado.atual, ...estado.anterior].some((s) => s.fonte === "reconstruido");
+  const sinAnterior = !estado.carregando && !estado.erro && janela && estado.anterior.length === 0;
+  const th = (label, k) => <SortableTh label={label} sortKey={k} sortConfig={sortConfig} onSort={handleSort} />;
+  const bom = dark ? "text-emerald-400" : "text-emerald-600";
+  const ruim = dark ? "text-red-400" : "text-red-600";
+  const VarCell = ({ v, menorMelhor, neutro }) => {
+    if (v === null || v === undefined) return <td className={"py-2.5 tabular-nums " + mutedText}>—</td>;
+    const cor = neutro || Math.abs(v) < 0.5 ? mutedText : ((v > 0) !== !!menorMelhor ? bom : ruim);
+    return <td className={"py-2.5 tabular-nums font-semibold " + cor}>{(v > 0 ? "+" : "") + v.toFixed(0).replace("-", "−") + "%"}</td>;
+  };
+  const fmtCpl = (v) => (v === null ? "—" : fmtBRL(v));
+  // O ano só aparece quando o período de comparação é de outro ano — sem ele, "Mesmo Mês Ano
+  // Passado" ficaria escrito igual ao período atual.
+  const rotulo = (d) => d.toLocaleDateString("pt-BR", d.getFullYear() !== range.start.getFullYear() ? { day: "2-digit", month: "2-digit", year: "numeric" } : { day: "2-digit", month: "2-digit" });
+
+  return (
+    <div className={"rounded-xl border p-4 " + cardBg}>
+      <h2 className="text-sm font-bold mb-1">Comparativo por Marca</h2>
+      {janela ? (
+        <p className={"text-xs mb-3 " + mutedText}>
+          {rotulo(janela.iniAtual)} a {rotulo(janela.fimAtual)} contra {rotulo(janela.iniAnt)} a {rotulo(janela.fimAnt)} ({janela.dias} {janela.dias === 1 ? "dia fechado" : "dias fechados"} em cada período)
+        </p>
+      ) : (
+        <p className={"text-xs mb-3 " + mutedText}>Ainda não há dia fechado neste mês pra comparar — volte amanhã.</p>
+      )}
+      {estado.carregando && janela && <p className={"text-xs py-6 text-center " + mutedText}>Carregando comparativo...</p>}
+      {estado.erro && <p className="text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-md px-3 py-2">{estado.erro}</p>}
+      {!estado.carregando && !estado.erro && janela && (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead><tr className={"text-left text-xs uppercase " + mutedText}>
+              {th("Marca", "marca")}
+              {verInvestimento && <>{th("Gasto", "gastoAtual")}{th("Gasto ant.", "gastoAnt")}{th("Var.", "varGasto")}</>}
+              {th("Leads", "leadsAtual")}{th("Leads ant.", "leadsAnt")}{th("Var.", "varLeads")}
+              {verInvestimento && <>{th("CPL", "cplAtual")}{th("CPL ant.", "cplAnt")}{th("Var.", "varCpl")}</>}
+            </tr></thead>
+            <tbody className={"divide-y " + (dark ? "divide-neutral-800" : "divide-neutral-100")}>
+              {ordenadas.map((l) => (
+                <tr key={l.marca}>
+                  <td className="py-2.5 font-semibold">{l.marca}</td>
+                  {verInvestimento && <>
+                    <td className="py-2.5 tabular-nums">{fmtBRL(l.gastoAtual)}</td>
+                    <td className={"py-2.5 tabular-nums " + mutedText}>{fmtBRL(l.gastoAnt)}</td>
+                    <VarCell v={l.varGasto} neutro />
+                  </>}
+                  <td className="py-2.5 tabular-nums">{fmtNum(l.leadsAtual)}</td>
+                  <td className={"py-2.5 tabular-nums " + mutedText}>{fmtNum(l.leadsAnt)}</td>
+                  <VarCell v={l.varLeads} />
+                  {verInvestimento && <>
+                    <td className="py-2.5 tabular-nums">{fmtCpl(l.cplAtual)}</td>
+                    <td className={"py-2.5 tabular-nums " + mutedText}>{fmtCpl(l.cplAnt)}</td>
+                    <VarCell v={l.varCpl} menorMelhor />
+                  </>}
+                </tr>
+              ))}
+            </tbody>
+            <tfoot>
+              <tr className={"border-t font-semibold " + (dark ? "border-neutral-800" : "border-neutral-200")}>
+                <td className="py-2.5">{total.marca}</td>
+                {verInvestimento && <>
+                  <td className="py-2.5 tabular-nums">{fmtBRL(total.gastoAtual)}</td>
+                  <td className={"py-2.5 tabular-nums " + mutedText}>{fmtBRL(total.gastoAnt)}</td>
+                  <VarCell v={total.varGasto} neutro />
+                </>}
+                <td className="py-2.5 tabular-nums">{fmtNum(total.leadsAtual)}</td>
+                <td className={"py-2.5 tabular-nums " + mutedText}>{fmtNum(total.leadsAnt)}</td>
+                <VarCell v={total.varLeads} />
+                {verInvestimento && <>
+                  <td className="py-2.5 tabular-nums">{fmtCpl(total.cplAtual)}</td>
+                  <td className={"py-2.5 tabular-nums " + mutedText}>{fmtCpl(total.cplAnt)}</td>
+                  <VarCell v={total.varCpl} menorMelhor />
+                </>}
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      )}
+      {sinAnterior && (
+        <p className={"text-xs mt-3 " + mutedText}>Não há histórico registrado pro período de comparação. O histórico do FEFO começa em 24/06/2026, então "Mesmo mês do ano passado" só terá dados a partir de junho de 2027.</p>
+      )}
+      {reconstruido && !estado.carregando && (
+        <p className={"text-xs mt-3 " + mutedText}>Dias anteriores a 25/09/2026 foram reconstruídos do histórico de tráfego; a partir daí cada dia é gravado uma vez e congelado.</p>
+      )}
+    </div>
+  );
+}
 function SettingsPanel({ open, onClose, dark, setDark, role, view, setView }) {
   if (!open) return null;
   return (
@@ -876,6 +1051,7 @@ function LoginScreen({ onLogin }) {
 
   return (
     <div className="min-h-screen w-full bg-neutral-950 text-neutral-100 flex items-center justify-center px-4">
+      <div className="flex items-stretch justify-center gap-8">
       <form onSubmit={handleSubmit} className="w-full max-w-sm bg-neutral-900/70 border border-neutral-800 rounded-xl p-6 flex flex-col gap-4">
         <div className="flex items-center gap-3 mb-2">
           <img src="/static/assets/logo-escuro.png" alt="Grupo Raviera" className="h-10 w-auto object-contain" />
@@ -900,6 +1076,16 @@ function LoginScreen({ onLogin }) {
           <IconLock className="h-3.5 w-3.5" /> {loading ? "Entrando..." : "Entrar"}
         </button>
       </form>
+      {/* A coluna reserva o espaço e estica junto com o card; o vídeo é absoluto dentro dela,
+          então acompanha a altura do card sem empurrar o layout (se fosse item normal do flex,
+          a altura dele é que mandaria). `muted` via ref porque sem isso o navegador bloqueia o
+          autoplay — React nem sempre aplica o atributo antes do vídeo tentar tocar. */}
+      <div className="hidden md:block relative w-[150px] shrink-0">
+        <video src="/static/assets/login-menino.webm" autoPlay playsInline aria-hidden="true"
+          ref={(el) => { if (el) el.muted = true; }}
+          className="absolute inset-y-0 left-0 h-full w-auto select-none pointer-events-none" />
+      </div>
+      </div>
     </div>
   );
 }
@@ -929,33 +1115,35 @@ function WelcomeOverlay({ show, nome, dark }) {
   );
 }
 
-// Easter egg pedido pelo Felipe (15/09/2026): sequência clássica do Konami code funcionando em
-// qualquer tela do sistema (não só uma), por isso vive aqui e é usado no componente raiz
-// (RavieraDashboard), não numa tela específica.
+// Easter eggs pedidos pelo Felipe (15/09/2026): sequências de teclado funcionando em qualquer
+// tela do sistema (não só uma), por isso vivem aqui e são usadas no componente raiz
+// (RavieraDashboard), não numa tela específica. useSequenciaTeclas é genérico (aceita
+// qualquer sequência) pra não duplicar a lógica de reconhecimento entre os dois easter eggs.
 const KONAMI_SEQUENCIA = ["ArrowUp", "ArrowUp", "ArrowDown", "ArrowDown", "ArrowLeft", "ArrowRight", "ArrowLeft", "ArrowRight", "b", "a"];
+const ESTRELAS_SEQUENCIA = ["ArrowDown", "ArrowDown", "ArrowUp", "ArrowUp", "ArrowRight", "ArrowLeft", "ArrowRight", "ArrowLeft", "a", "b"];
 
-function useKonamiCode(onTrigger) {
+function useSequenciaTeclas(sequencia, onTrigger) {
   useEffect(() => {
     let progresso = 0;
     function aoTeclar(e) {
-      // Teclas de uma letra só (b/a) vêm maiúsculas com Caps Lock ligado — normaliza; as de
+      // Teclas de uma letra só (a/b) vêm maiúsculas com Caps Lock ligado — normaliza; as de
       // seta (ArrowUp etc.) já são um nome fixo, não precisam disso.
       const tecla = e.key.length === 1 ? e.key.toLowerCase() : e.key;
-      if (tecla === KONAMI_SEQUENCIA[progresso]) {
+      if (tecla === sequencia[progresso]) {
         progresso += 1;
-        if (progresso === KONAMI_SEQUENCIA.length) {
+        if (progresso === sequencia.length) {
           progresso = 0;
           onTrigger();
         }
       } else {
         // Não zera direto pra "primeira tecla errada de novo já conta como o primeiro passo"
         // funcionar (ex.: ↑ ↑ ↑ ↓ ↓... continua reconhecendo a partir do segundo ↑).
-        progresso = tecla === KONAMI_SEQUENCIA[0] ? 1 : 0;
+        progresso = tecla === sequencia[0] ? 1 : 0;
       }
     }
     window.addEventListener("keydown", aoTeclar);
     return () => window.removeEventListener("keydown", aoTeclar);
-  }, [onTrigger]);
+  }, [sequencia, onTrigger]);
 }
 
 function ModoTurboOverlay({ show, dark, onDone }) {
@@ -994,6 +1182,40 @@ function ModoTurboOverlay({ show, dark, onDone }) {
         <p className={"text-lg font-bold " + (dark ? "text-neutral-50" : "text-neutral-900")}>🏁 Modo turbo ativado!</p>
         <p className={"text-sm " + (dark ? "text-neutral-400" : "text-neutral-500")}>60 anos de estrada, Grupo Raviera 🏎️💨</p>
       </div>
+    </div>
+  );
+}
+
+// Segundo easter egg (15/09/2026): sequência ↓ ↓ ↑ ↑ → ← → ← A B toca um vídeo (mudo, do
+// jeito que o Felipe pediu) com estrelas cadentes cruzando a tela em volta, contínuas
+// enquanto o vídeo roda — diferente do Modo Turbo (que é uma rajada curta e cronometrada),
+// aqui quem decide quando acabar é o próprio vídeo (evento onEnded), não um timer fixo,
+// porque não dava pra saber a duração exata sem abrir o arquivo.
+function EstrelasCadentesOverlay({ show, onDone }) {
+  const estrelas = useMemo(() => {
+    if (!show) return [];
+    return Array.from({ length: 35 }, (_, i) => ({
+      id: i,
+      inicioTop: Math.random() * 100,
+      inicioLeft: Math.random() * 100,
+      duracao: 1.4 + Math.random() * 2,
+      atraso: Math.random() * 4,
+      tamanho: 14 + Math.random() * 18,
+    }));
+  }, [show]);
+
+  if (!show) return null;
+  return (
+    <div className="fixed inset-0 z-[300] overflow-hidden bg-black/70 flex items-center justify-center cursor-pointer" onClick={onDone}>
+      {estrelas.map((e) => (
+        <span key={e.id} className="estrela-cadente" role="presentation"
+          style={{ top: e.inicioTop + "%", left: e.inicioLeft + "%", fontSize: e.tamanho, animationDuration: e.duracao + "s", animationDelay: e.atraso + "s" }}>
+          🌠
+        </span>
+      ))}
+      <video src="/static/assets/easter-egg-estrelas.mp4" autoPlay muted playsInline onEnded={onDone}
+        onClick={(ev) => ev.stopPropagation()}
+        className="relative rounded-2xl shadow-2xl max-w-[90vw] max-h-[80vh] cursor-default" />
     </div>
   );
 }
@@ -1043,6 +1265,142 @@ function ConfirmModal({ confirm, onCancel, onConfirm, dark }) {
         </div>
       </div>
     </div>
+  );
+}
+
+function ContaMetaRow({ a, token, inputCls, deleteBtnCls, askConfirm, withErrorHandling }) {
+  const [billing, setBilling] = useState({
+    billing_business_id: a.billing_business_id || "",
+    billing_asset_id: a.billing_asset_id || "",
+    billing_payment_account_id: a.billing_payment_account_id || "",
+  });
+  const alterado =
+    billing.billing_business_id !== (a.billing_business_id || "") ||
+    billing.billing_asset_id !== (a.billing_asset_id || "") ||
+    billing.billing_payment_account_id !== (a.billing_payment_account_id || "");
+
+  function salvar() {
+    withErrorHandling(() =>
+      authJson(`/admin/ad-accounts/${a.id}`, token, {
+        method: "PUT",
+        body: JSON.stringify({ meta_account_id: a.meta_account_id, nome: a.nome, ...billing }),
+      })
+    );
+  }
+
+  return (
+    <tr>
+      <td className="py-1.5 whitespace-nowrap">{a.meta_account_id}</td>
+      <td className="py-1.5 whitespace-nowrap">{a.nome}</td>
+      <td className="py-1.5">
+        <input className={inputCls + " w-36"} placeholder="business_id" value={billing.billing_business_id}
+          onChange={(e) => setBilling({ ...billing, billing_business_id: e.target.value })} />
+      </td>
+      <td className="py-1.5">
+        <input className={inputCls + " w-40"} placeholder="asset_id" value={billing.billing_asset_id}
+          onChange={(e) => setBilling({ ...billing, billing_asset_id: e.target.value })} />
+      </td>
+      <td className="py-1.5">
+        <input className={inputCls + " w-40"} placeholder="payment_account_id" value={billing.billing_payment_account_id}
+          onChange={(e) => setBilling({ ...billing, billing_payment_account_id: e.target.value })} />
+      </td>
+      <td className="py-1.5 text-right whitespace-nowrap">
+        {alterado && (
+          <button onClick={salvar} className="mr-1.5 px-2 py-1 rounded-md text-xs font-semibold bg-blue-600 text-white hover:bg-blue-700">
+            Salvar
+          </button>
+        )}
+        <button onClick={() => askConfirm(`Excluir a conta "${a.nome}"?`, () => withErrorHandling(() => authJson(`/admin/ad-accounts/${a.id}`, token, { method: "DELETE" })))} className={deleteBtnCls} title="Excluir conta" aria-label="Excluir conta"><IconTrash className="h-3.5 w-3.5" /></button>
+      </td>
+    </tr>
+  );
+}
+
+function MarcaRow({ b, accounts, igAccounts, googleAccounts, token, inputCls, deleteBtnCls, mutedText, askConfirm, withErrorHandling }) {
+  const [editando, setEditando] = useState(false);
+  const [rascunho, setRascunho] = useState(null);
+  const conta = accounts.find((a) => a.id === b.ad_account_id);
+  const ig = igAccounts.find((a) => a.id === b.instagram_account_id);
+  const gg = googleAccounts.find((a) => a.id === b.google_ads_account_id);
+
+  function comecarEdicao() {
+    setRascunho({
+      nome: b.nome, ad_account_id: b.ad_account_id ?? "", campaign_filter: b.campaign_filter || "",
+      diario_esperado_meta: b.diario_esperado_meta ?? 0, analista: b.analista || "",
+      instagram_account_id: b.instagram_account_id ?? "", google_ads_account_id: b.google_ads_account_id ?? "",
+      google_orcamento_mensal: b.google_orcamento_mensal ?? 0,
+    });
+    setEditando(true);
+  }
+  function salvar() {
+    const r = rascunho;
+    withErrorHandling(async () => {
+      await authJson(`/admin/brands/${b.id}`, token, {
+        method: "PUT",
+        body: JSON.stringify({
+          nome: r.nome.trim(), campaign_filter: r.campaign_filter.trim() || null, analista: r.analista.trim(),
+          ad_account_id: r.ad_account_id ? Number(r.ad_account_id) : null,
+          diario_esperado_meta: Number(r.diario_esperado_meta) || 0,
+          instagram_account_id: r.instagram_account_id ? Number(r.instagram_account_id) : null,
+          google_ads_account_id: r.google_ads_account_id ? Number(r.google_ads_account_id) : null,
+          google_orcamento_mensal: Number(r.google_orcamento_mensal) || 0,
+        }),
+      });
+      setEditando(false); // só chega aqui se o servidor aceitou — se recusar, continua editando com o aviso na tela
+    });
+  }
+  const set = (campo) => (e) => setRascunho({ ...rascunho, [campo]: e.target.value });
+
+  if (!editando) {
+    return (
+      <tr>
+        <td className="py-1.5 font-semibold">{b.nome}</td>
+        <td className="py-1.5">{conta ? conta.nome : "—"}</td>
+        <td className="py-1.5">{b.campaign_filter || "—"}</td>
+        <td className="py-1.5">{fmtBRL(b.diario_esperado_meta)}</td>
+        <td className="py-1.5">{b.orcamento_diario_real == null ? "—" : fmtBRL(b.orcamento_diario_real)}</td>
+        <td className="py-1.5">{b.analista || "—"}</td>
+        <td className="py-1.5">{ig && ig.username ? "@" + ig.username : "—"}</td>
+        <td className="py-1.5">{gg ? gg.customer_id : "—"}</td>
+        <td className="py-1.5">{fmtBRL(b.google_orcamento_mensal)}</td>
+        <td className="py-1.5 text-right whitespace-nowrap">
+          <button onClick={comecarEdicao} className={"p-1.5 rounded-md transition-colors " + mutedText + " hover:text-blue-500"} title="Editar marca" aria-label="Editar marca"><IconPencil className="h-3.5 w-3.5" /></button>
+          <button onClick={() => askConfirm(`Excluir a marca "${b.nome}"? Todo o histórico de tráfego e criativos dessa marca será perdido.`, () => withErrorHandling(() => authJson(`/admin/brands/${b.id}`, token, { method: "DELETE" })))} className={deleteBtnCls} title="Excluir marca" aria-label="Excluir marca"><IconTrash className="h-3.5 w-3.5" /></button>
+        </td>
+      </tr>
+    );
+  }
+  return (
+    <tr>
+      <td className="py-1.5 pr-1"><input className={inputCls + " w-40"} value={rascunho.nome} onChange={set("nome")} /></td>
+      <td className="py-1.5 pr-1">
+        <select className={inputCls + " w-36"} value={rascunho.ad_account_id} onChange={set("ad_account_id")}>
+          <option value="">Sem conta</option>
+          {accounts.map((a) => <option key={a.id} value={a.id}>{a.nome}</option>)}
+        </select>
+      </td>
+      <td className="py-1.5 pr-1"><input className={inputCls + " w-44"} placeholder="trecho do nome (ou !excluir)" value={rascunho.campaign_filter} onChange={set("campaign_filter")} /></td>
+      <td className="py-1.5 pr-1"><input type="number" className={inputCls + " w-24"} value={rascunho.diario_esperado_meta} onChange={set("diario_esperado_meta")} /></td>
+      <td className={"py-1.5 pr-1 text-xs " + mutedText}>{b.orcamento_diario_real == null ? "—" : fmtBRL(b.orcamento_diario_real)}</td>
+      <td className="py-1.5 pr-1"><input className={inputCls + " w-24"} value={rascunho.analista} onChange={set("analista")} /></td>
+      <td className="py-1.5 pr-1">
+        <select className={inputCls + " w-32"} value={rascunho.instagram_account_id} onChange={set("instagram_account_id")}>
+          <option value="">—</option>
+          {igAccounts.map((a) => <option key={a.id} value={a.id}>@{a.username}</option>)}
+        </select>
+      </td>
+      <td className="py-1.5 pr-1">
+        <select className={inputCls + " w-32"} value={rascunho.google_ads_account_id} onChange={set("google_ads_account_id")}>
+          <option value="">—</option>
+          {googleAccounts.map((a) => <option key={a.id} value={a.id}>{a.nome} ({a.customer_id})</option>)}
+        </select>
+      </td>
+      <td className="py-1.5 pr-1"><input type="number" className={inputCls + " w-24"} value={rascunho.google_orcamento_mensal} onChange={set("google_orcamento_mensal")} /></td>
+      <td className="py-1.5 text-right whitespace-nowrap">
+        <button onClick={salvar} disabled={!rascunho.nome.trim()} className="mr-1.5 px-2 py-1 rounded-md text-xs font-semibold bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50">Salvar</button>
+        <button onClick={() => setEditando(false)} className={"px-2 py-1 rounded-md text-xs font-semibold border " + mutedText}>Cancelar</button>
+      </td>
+    </tr>
   );
 }
 
@@ -1138,27 +1496,33 @@ function AdminPanel({ token, dark, cardBg, mutedText, pushToast }) {
 
       {abaAtiva === "meta" && (
       <div className={"rounded-xl border p-4 " + cardBg}>
-        <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
           <h2 className="text-sm font-bold">Contas de Anúncio (Meta)</h2>
           <input placeholder="Buscar por nome ou ID..." className={searchCls} value={buscaContas} onChange={(e) => setBuscaContas(e.target.value)} />
         </div>
-        <table className="w-full text-sm mb-3">
-          <thead><tr className={"text-left text-xs uppercase " + mutedText}><th className="pb-2">ID Meta</th><th className="pb-2">Nome</th><th className="pb-2"></th></tr></thead>
+        <p className={"text-xs mb-3 " + mutedText}>
+          Os 3 campos de Nota Fiscal são opcionais e preenchidos uma vez só: abra "Cobrança e pagamentos → Faturas" dessa conta no
+          Gerenciador de Negócios, clique numa Nota Fiscal e copie <code>business_id</code>, <code>asset_id</code> e{" "}
+          <code>payment_account_id</code> da URL. Sem API pra isso — o Meta não expõe esses IDs, só a tela mesmo.
+        </p>
+        <div className="overflow-x-auto">
+        <table className="w-full text-sm mb-3 min-w-[860px]">
+          <thead><tr className={"text-left text-xs uppercase " + mutedText}>
+            <th className="pb-2">ID Meta</th><th className="pb-2">Nome</th>
+            <th className="pb-2">NF: business_id</th><th className="pb-2">NF: asset_id</th><th className="pb-2">NF: payment_account_id</th>
+            <th className="pb-2"></th>
+          </tr></thead>
           <tbody className={"divide-y " + (dark ? "divide-neutral-800" : "divide-neutral-100")}>
             {contasFiltradas.map((a) => (
-              <tr key={a.id}>
-                <td className="py-1.5">{a.meta_account_id}</td>
-                <td className="py-1.5">{a.nome}</td>
-                <td className="py-1.5 text-right">
-                  <button onClick={() => askConfirm(`Excluir a conta "${a.nome}"?`, () => withErrorHandling(() => authJson(`/admin/ad-accounts/${a.id}`, token, { method: "DELETE" })))} className={deleteBtnCls} title="Excluir conta" aria-label="Excluir conta"><IconTrash className="h-3.5 w-3.5" /></button>
-                </td>
-              </tr>
+              <ContaMetaRow key={a.id} a={a} token={token} inputCls={inputCls} deleteBtnCls={deleteBtnCls}
+                askConfirm={askConfirm} withErrorHandling={withErrorHandling} />
             ))}
             {contasFiltradas.length === 0 && (
-              <tr><td colSpan="3" className={"py-4 text-center text-xs " + mutedText}>Nenhuma conta encontrada pra "{buscaContas}".</td></tr>
+              <tr><td colSpan="6" className={"py-4 text-center text-xs " + mutedText}>Nenhuma conta encontrada pra "{buscaContas}".</td></tr>
             )}
           </tbody>
         </table>
+        </div>
         <div className="flex flex-wrap gap-2 items-end">
           <input placeholder="act_123456789" className={inputCls} value={newAccount.meta_account_id} onChange={(e) => setNewAccount({ ...newAccount, meta_account_id: e.target.value })} />
           <input placeholder="Nome (ex: Conta BMW/MINI)" className={inputCls} value={newAccount.nome} onChange={(e) => setNewAccount({ ...newAccount, nome: e.target.value })} />
@@ -1243,33 +1607,23 @@ function AdminPanel({ token, dark, cardBg, mutedText, pushToast }) {
           <h2 className="text-sm font-bold">Marcas</h2>
           <input placeholder="Buscar por marca ou analista..." className={searchCls} value={buscaMarcas} onChange={(e) => setBuscaMarcas(e.target.value)} />
         </div>
-        <p className={"text-xs mb-3 " + mutedText}>Se várias marcas dividem a mesma conta, use "Filtro de campanha" com o prefixo do nome das campanhas de cada marca no Meta.</p>
-        <table className="w-full text-sm mb-3 min-w-[640px]">
+        <p className={"text-xs mb-3 " + mutedText}>Se várias marcas dividem a mesma conta, use "Filtro de campanha" com um trecho do nome das campanhas de cada marca no Meta — basta o trecho aparecer no nome, em qualquer posição, sem diferenciar maiúscula. Começando com "!" a marca fica com tudo que NÃO contém o trecho. Campanha que nenhuma marca da conta reivindica não aparece no painel (o sistema avisa no sino).</p>
+        <div className="overflow-x-auto">
+        <table className="w-full text-sm mb-3 min-w-[1000px]">
           <thead><tr className={"text-left text-xs uppercase " + mutedText}>
             <th className="pb-2">Marca</th><th className="pb-2">Conta</th><th className="pb-2">Filtro campanha</th><th className="pb-2">Orç. planejado</th><th className="pb-2">Orç. real (Meta)</th><th className="pb-2">Analista</th><th className="pb-2">Instagram</th><th className="pb-2">Google Ads</th><th className="pb-2">Orç. mensal Google</th><th className="pb-2"></th>
           </tr></thead>
           <tbody className={"divide-y " + (dark ? "divide-neutral-800" : "divide-neutral-100")}>
             {marcasFiltradas.map((b) => (
-              <tr key={b.id}>
-                <td className="py-1.5 font-semibold">{b.nome}</td>
-                <td className="py-1.5">{(accounts.find((a) => a.id === b.ad_account_id) || {}).nome || "—"}</td>
-                <td className="py-1.5">{b.campaign_filter || "—"}</td>
-                <td className="py-1.5">{fmtBRL(b.diario_esperado_meta)}</td>
-                <td className="py-1.5">{b.orcamento_diario_real == null ? "—" : fmtBRL(b.orcamento_diario_real)}</td>
-                <td className="py-1.5">{b.analista || "—"}</td>
-                <td className="py-1.5">{(igAccounts.find((a) => a.id === b.instagram_account_id) || {}).username ? "@" + igAccounts.find((a) => a.id === b.instagram_account_id).username : "—"}</td>
-                <td className="py-1.5">{(googleAccounts.find((a) => a.id === b.google_ads_account_id) || {}).customer_id || "—"}</td>
-                <td className="py-1.5">{fmtBRL(b.google_orcamento_mensal)}</td>
-                <td className="py-1.5 text-right">
-                  <button onClick={() => askConfirm(`Excluir a marca "${b.nome}"? Todo o histórico de tráfego e criativos dessa marca será perdido.`, () => withErrorHandling(() => authJson(`/admin/brands/${b.id}`, token, { method: "DELETE" })))} className={deleteBtnCls} title="Excluir marca" aria-label="Excluir marca"><IconTrash className="h-3.5 w-3.5" /></button>
-                </td>
-              </tr>
+              <MarcaRow key={b.id} b={b} accounts={accounts} igAccounts={igAccounts} googleAccounts={googleAccounts} token={token}
+                inputCls={inputCls} deleteBtnCls={deleteBtnCls} mutedText={mutedText} askConfirm={askConfirm} withErrorHandling={withErrorHandling} />
             ))}
             {marcasFiltradas.length === 0 && (
               <tr><td colSpan="10" className={"py-4 text-center text-xs " + mutedText}>Nenhuma marca encontrada pra "{buscaMarcas}".</td></tr>
             )}
           </tbody>
         </table>
+        </div>
         <div className="flex flex-wrap gap-2 items-end">
           <input placeholder="Nome da marca" className={inputCls} value={newBrand.nome} onChange={(e) => setNewBrand({ ...newBrand, nome: e.target.value })} />
           <select className={inputCls} value={newBrand.ad_account_id} onChange={(e) => setNewBrand({ ...newBrand, ad_account_id: e.target.value })}>
@@ -2947,7 +3301,7 @@ const FAQ_BASE = [
   {
     id: "comparativo",
     gatilhos: ["comparativo", "comparar", "mes anterior", "ano passado", "comparacao"],
-    resposta: 'Clique em "Comparativo" na barra de período. Vai aparecer um segundo seletor pra escolher entre "Mês Anterior" ou "Mesmo Mês Ano Passado" — o painel compara o mesmo intervalo de dias nos dois períodos (ex: dia 1 a 28 nos dois) pra a porcentagem não ficar distorcida.',
+    resposta: 'Clique em "Comparativo" na barra de período. Vai aparecer um segundo seletor pra escolher entre "Mês Anterior" ou "Mesmo Mês Ano Passado" — o painel compara o mesmo intervalo de dias nos dois períodos (ex: dia 1 a 28 nos dois) pra a porcentagem não ficar distorcida. Logo abaixo dos cards aparece também a tabela "Comparativo por Marca" (gasto, leads e CPL de cada marca contra o período anterior, só com dias já fechados) — dá pra ordenar clicando nos títulos das colunas.',
   },
   {
     id: "filtro_marca",
@@ -3228,6 +3582,7 @@ const NOTIFICACAO_ESTILO = {
   falha_sync: { IconComp: IconXCircle, cor: "text-neutral-500" },
   versao: { IconComp: IconSparkle, cor: "text-blue-500" },
   publico_sobreposto: { IconComp: IconUsers, cor: "text-indigo-500" },
+  gasto_sem_marca: { IconComp: IconAlertTriangle, cor: "text-amber-500" },
   orcamento_subutilizado: { IconComp: IconGauge, cor: "text-cyan-500" },
 };
 
@@ -3330,7 +3685,9 @@ function RavieraDashboard({ token, role, email, nome, permissoes, justLoggedIn, 
   const [dark, setDark] = useState(() => localStorage.getItem("raviera_theme") !== "light");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [modoTurbo, setModoTurbo] = useState(false);
-  useKonamiCode(useCallback(() => setModoTurbo(true), []));
+  useSequenciaTeclas(KONAMI_SEQUENCIA, useCallback(() => setModoTurbo(true), []));
+  const [estrelasCadentes, setEstrelasCadentes] = useState(false);
+  useSequenciaTeclas(ESTRELAS_SEQUENCIA, useCallback(() => setEstrelasCadentes(true), []));
   const [view, setView] = useState("dashboard"); // "dashboard" (Meta) | "google" | "funil" | "redes" | "concorrencia" | "config"
   const [dashboardMenuOpen, setDashboardMenuOpen] = useState(false);
   const [marcaFiltro, setMarcaFiltro] = useState("todas");
@@ -3466,7 +3823,8 @@ function RavieraDashboard({ token, role, email, nome, permissoes, justLoggedIn, 
 
   const linhasSaldo = useMemo(() => {
     return brandsToShow.map((marca) => {
-      const brandId = (dashboardData.brands.find((b) => b.nome === marca) || {}).id;
+      const brand = dashboardData.brands.find((b) => b.nome === marca) || {};
+      const brandId = brand.id;
       const saldo = dashboardData.saldos.find((s) => s.marca === marca) || {};
       const trafRecs = filterByRange(dashboardData.trafego.filter((r) => r.marca === marca), range);
       const agg = aggregateTrafego(trafRecs);
@@ -3481,16 +3839,27 @@ function RavieraDashboard({ token, role, email, nome, permissoes, justLoggedIn, 
       // Meta é o suficiente pra valer a pena conferir — reajuste feito direto na campanha e
       // esquecido de replicar aqui, ou o contrário.
       const orcamentoDivergente = diarioEsperado > 0 && orcamentoReal != null && Math.abs(orcamentoReal - diarioEsperado) > diarioEsperado * 0.1;
-      const diasRestantes = diarioEsperado > 0 ? saldoAtual / diarioEsperado : null;
+      // Fôlego por CONTA (o saldo é da conta: BMW Auto + Motorrad + MINI gastam do mesmo), sobre o
+      // gasto real recente — calculado no backend com todas as marcas da conta (app/runway.py).
+      const diasRestantes = saldo.runwayDias ?? null;
       return {
-        marca, brandId, gasto: agg.gasto, quantidade: agg.quantidade, cpl: agg.cpl, saldoAtual, diarioEsperado,
+        marca, brandId, analista: brand.analista || "", gasto: agg.gasto, quantidade: agg.quantidade, cpl: agg.cpl, saldoAtual, diarioEsperado,
         orcamentoReal, orcamentoDivergente, diasRestantes, status: statusRunway(diasRestantes),
         gastoMedioRecente: saldo.gastoMedioRecente, orcamentoSubutilizado: saldo.orcamentoSubutilizado,
+        notaFiscalUrl: saldo.notaFiscalUrl || null,
+        contaId: saldo.contaId ?? null, marcasNaConta: saldo.marcasNaConta || [], totalMarcasNaConta: saldo.totalMarcasNaConta || 1,
+        ritmoDiario: saldo.ritmoDiario ?? null, ritmoFonte: saldo.ritmoFonte || null,
+        faltaAteFimDoMes: saldo.faltaAteFimDoMes || 0,
       };
     });
   }, [brandsToShow, dashboardData.saldos, dashboardData.trafego, range]);
 
-  const contasEmRisco = useMemo(() => linhasSaldo.filter((l) => l.status === "critico" || l.status === "atencao").length, [linhasSaldo]);
+  // Conta, não marca: uma conta compartilhada por três marcas zerada é UM problema, não três.
+  const chaveConta = (l) => (l.contaId != null ? "c" + l.contaId : "m" + l.marca);
+  const contasEmRisco = useMemo(
+    () => new Set(linhasSaldo.filter((l) => l.status === "critico" || l.status === "atencao").map(chaveConta)).size,
+    [linhasSaldo]
+  );
 
   const STATUS_ORDER = { critico: 0, atencao: 1, semDados: 2, ok: 3 };
   const linhasSaldoOrdenadas = useMemo(() => {
@@ -3510,8 +3879,11 @@ function RavieraDashboard({ token, role, email, nome, permissoes, justLoggedIn, 
   }, [linhasSaldo, sortConfig]);
 
   const totalsSaldo = useMemo(() => {
+    const contasSomadas = new Set();
     const t = linhasSaldo.reduce((acc, r) => {
-      acc.gasto += r.gasto; acc.quantidade += r.quantidade; acc.saldoAtual += r.saldoAtual; acc.diarioEsperado += r.diarioEsperado;
+      acc.gasto += r.gasto; acc.quantidade += r.quantidade; acc.diarioEsperado += r.diarioEsperado;
+      // Saldo é da conta: marcas que dividem a mesma repetiam o mesmo valor e o total saía inflado.
+      if (!contasSomadas.has(chaveConta(r))) { contasSomadas.add(chaveConta(r)); acc.saldoAtual += r.saldoAtual; }
       if (r.orcamentoReal != null) acc.orcamentoReal += r.orcamentoReal;
       return acc;
     }, { gasto: 0, quantidade: 0, saldoAtual: 0, diarioEsperado: 0, orcamentoReal: 0 });
@@ -3592,6 +3964,19 @@ function RavieraDashboard({ token, role, email, nome, permissoes, justLoggedIn, 
   function handleSort(key) {
     setSortConfig((prev) => (prev.key === key ? { key, dir: prev.dir === "asc" ? "desc" : "asc" } : { key, dir: "asc" }));
   }
+  function runwayTooltip(row) {
+    const base = row.ritmoFonte === "real" ? "gasto real recente" : "orçamento planejado (sem gasto recente)";
+    let t = "Saldo da conta ÷ " + base + " de " + fmtBRL(row.ritmoDiario) + "/dia";
+    if (row.totalMarcasNaConta > 1) {
+      t += " — conta compartilhada por " + row.totalMarcasNaConta + " marcas" + (row.marcasNaConta.length ? " (com " + row.marcasNaConta.join(", ") + ")" : "");
+    }
+    if (row.faltaAteFimDoMes > 0) {
+      const hoje = new Date();
+      const ultimo = new Date(hoje.getFullYear(), hoje.getMonth() + 1, 0).getDate();
+      t += ". Faltam " + fmtBRL(row.faltaAteFimDoMes) + " pra cobrir até o dia " + ultimo;
+    }
+    return t;
+  }
 
   const bg = dark ? "bg-neutral-950" : "bg-neutral-50";
   const text = dark ? "text-neutral-100" : "text-neutral-900";
@@ -3607,6 +3992,7 @@ function RavieraDashboard({ token, role, email, nome, permissoes, justLoggedIn, 
       <CampanhaDiagnosticoModal info={diagnosticoInfo} onClose={() => setDiagnosticoInfo(null)} dark={dark} token={token} />
       <WelcomeOverlay show={showWelcome} nome={nome} dark={dark} />
       <ModoTurboOverlay show={modoTurbo} dark={dark} onDone={() => setModoTurbo(false)} />
+      <EstrelasCadentesOverlay show={estrelasCadentes} onDone={() => setEstrelasCadentes(false)} />
       <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 flex flex-col gap-6">
         <header className="flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-center gap-3 cursor-pointer" title="Voltar para a tela principal"
@@ -3763,6 +4149,11 @@ function RavieraDashboard({ token, role, email, nome, permissoes, justLoggedIn, 
               )}
             </div>
 
+            {periodo === "comparativo" && (
+              <ComparativoMarcas token={token} range={range} prevRange={prevRange} brandsToShow={brandsToShow}
+                dark={dark} cardBg={cardBg} mutedText={mutedText} verInvestimento={permissoes.verInvestimento} />
+            )}
+
             {(() => {
               // Cada quadro reordenável do painel principal, descrito uma vez só: se aparece
               // (mesmas condições de antes) e o miolo dele (mesmo JSX de antes, só que sem a
@@ -3913,11 +4304,12 @@ function RavieraDashboard({ token, role, email, nome, permissoes, justLoggedIn, 
                   content: (
                     <>
                       <h2 className="text-sm font-bold mb-1 pr-8">Saldo das Contas de Anúncios (Meta Ads)</h2>
-                      <p className={"text-xs mb-4 " + mutedText}>Runway estimado: saldo atual ÷ orçamento planejado · Crítico ≤{RUNWAY_CRITICO}d · Atenção ≤{RUNWAY_ATENCAO}d — "Orç. Real" é o que está configurado agora no Meta, lido a cada sincronização</p>
+                      <p className={"text-xs mb-4 " + mutedText}>Runway: saldo da conta ÷ gasto real recente da conta inteira (o maior entre a média de 7 e de 3 dias fechados) · Crítico ≤{RUNWAY_CRITICO}d · Atenção ≤{RUNWAY_ATENCAO}d. Marcas que dividem a mesma conta mostram o mesmo saldo e o mesmo fôlego (ícone de pessoas), e o total soma cada conta uma vez só. "Orç. Real" é o que está configurado agora no Meta, lido a cada sincronização</p>
                       <div className="overflow-x-auto">
                         <table className="w-full text-sm min-w-[760px]">
                         <thead><tr className={"text-left text-xs uppercase tracking-wide " + mutedText}>
                           <SortableTh label="Marca" sortKey="marca" sortConfig={sortConfig} onSort={handleSort} />
+                          <SortableTh label="Analista" sortKey="analista" sortConfig={sortConfig} onSort={handleSort} />
                           <SortableTh label="Investimento" sortKey="gasto" sortConfig={sortConfig} onSort={handleSort} />
                           <SortableTh label="Leads" sortKey="quantidade" sortConfig={sortConfig} onSort={handleSort} />
                           <SortableTh label="CPL" sortKey="cpl" sortConfig={sortConfig} onSort={handleSort} />
@@ -3940,8 +4332,16 @@ function RavieraDashboard({ token, role, email, nome, permissoes, justLoggedIn, 
                                       <IconSearch className="h-3.5 w-3.5" />
                                     </button>
                                   )}
+                                  {row.notaFiscalUrl && (
+                                    <a href={row.notaFiscalUrl} target="_blank" rel="noopener noreferrer"
+                                      title={`Abrir Nota Fiscal de ${row.marca} no Gerenciador de Negócios (Meta)`}
+                                      className={"shrink-0 p-1 rounded-md transition-colors " + (dark ? "text-neutral-500 hover:text-neutral-200 hover:bg-neutral-800" : "text-neutral-400 hover:text-neutral-700 hover:bg-neutral-100")}>
+                                      <IconArrowUp className="h-3.5 w-3.5 rotate-45" />
+                                    </a>
+                                  )}
                                 </div>
                               </td>
+                              <td className="py-2.5">{row.analista || <span className={mutedText}>—</span>}</td>
                               <td className="py-2.5 tabular-nums">{fmtBRL(row.gasto)}</td>
                               <td className="py-2.5 tabular-nums">{fmtNum(row.quantidade)}</td>
                               <td className="py-2.5 tabular-nums">{fmtBRL(row.cpl)}</td>
@@ -3964,7 +4364,14 @@ function RavieraDashboard({ token, role, email, nome, permissoes, justLoggedIn, 
                                   </span>
                                 )}
                               </td>
-                              <td className="py-2.5 tabular-nums">{row.diasRestantes !== null ? row.diasRestantes.toFixed(1) + "d" : "—"}</td>
+                              <td className="py-2.5 tabular-nums">
+                                {row.diasRestantes !== null ? (
+                                  <span className="inline-flex items-center gap-1 cursor-help" title={runwayTooltip(row)}>
+                                    {row.diasRestantes.toFixed(1) + "d"}
+                                    {row.totalMarcasNaConta > 1 && <IconUsers className={"h-3 w-3 shrink-0 " + mutedText} />}
+                                  </span>
+                                ) : "—"}
+                              </td>
                               <td className="py-2.5"><StatusPill status={row.status} dark={dark} /></td>
                             </tr>
                           ))}
@@ -3972,6 +4379,7 @@ function RavieraDashboard({ token, role, email, nome, permissoes, justLoggedIn, 
                         <tfoot>
                           <tr className={"border-t font-semibold " + (dark ? "border-neutral-800" : "border-neutral-200")}>
                             <td className="py-2.5">Total ({linhasSaldo.length})</td>
+                            <td className="py-2.5"></td>
                             <td className="py-2.5 tabular-nums">{fmtBRL(totalsSaldo.gasto)}</td>
                             <td className="py-2.5 tabular-nums">{fmtNum(totalsSaldo.quantidade)}</td>
                             <td className="py-2.5 tabular-nums">{fmtBRL(totalsSaldo.cpl)}</td>
@@ -4006,7 +4414,14 @@ function RavieraDashboard({ token, role, email, nome, permissoes, justLoggedIn, 
               });
             })()}
 
-            <footer className={"text-center text-[11px] py-2 " + mutedText}>FEFO · Vendas e test-drives serão integrados em uma etapa futura (outro sistema) · v{APP_VERSION}</footer>
+            <footer className={"text-center text-[11px] py-2 " + mutedText}>
+              FEFO · Vendas e test-drives serão integrados em uma etapa futura (outro sistema) · v{APP_VERSION}
+              {" · "}
+              <a href="https://docs.google.com/document/d/195gJ3JvQCOG-GdLzX-eYT7pBzHpMJhJ3cukFeIEVDI8/edit" target="_blank" rel="noopener noreferrer"
+                className={dark ? "underline hover:text-neutral-300" : "underline hover:text-neutral-700"}>
+                Política de Privacidade
+              </a>
+            </footer>
           </>
         )}
       </div>

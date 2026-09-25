@@ -5,6 +5,12 @@ versão; versão sem entrada aqui usa o texto genérico (ver `app.main._checar_n
 """
 
 NOTAS_VERSAO: dict[str, str] = {
+    "0.59": (
+        "Novo: tabela Comparativo por Marca (aparece ao escolher Comparativo), relatório do dia "
+        "anterior guardado no histórico, edição de marcas em Configuração e alerta de saldo por conta. "
+        "Corrigido: os dias de saldo das contas que várias marcas dividem (BMW, Ram) estavam maiores "
+        "que o real, e o total de saldo somava a mesma conta mais de uma vez."
+    ),
     "0.58": (
         "Novo: diagnóstico de campanha (lupa ao lado de cada marca) e 4 notificações novas — "
         "alta performance, aprendizado travado, públicos sobrepostos e orçamento subutilizado. "

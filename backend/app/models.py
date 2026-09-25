@@ -54,6 +54,16 @@ class AdAccount(Base):
     meta_account_id = Column(String, unique=True, nullable=False)  # ex: act_123456789
     nome = Column(String, nullable=False)
 
+    # Preenchidos à mão uma vez, copiados da URL da tela "Cobrança e pagamentos" do Gerenciador
+    # de Negócios (business.facebook.com) — não existe campo nenhum na Graph API que devolva
+    # esses 3 IDs (confirmado testando: nenhum aparece em /act_X com qualquer combinação de
+    # campos), então não tem como buscar isso sozinho na sincronização. Só preenchidos quando
+    # a marca tem nota fiscal de verdade disponível (contas pré-pagas do grupo têm; o endpoint
+    # público business_invoices da Graph API não expõe esse dado, só a tela mesmo).
+    billing_business_id = Column(String, nullable=True)
+    billing_asset_id = Column(String, nullable=True)
+    billing_payment_account_id = Column(String, nullable=True)
+
     brands = relationship("Brand", back_populates="ad_account")
 
 
@@ -711,3 +721,90 @@ class SistemaEstado(Base):
     id = Column(Integer, primary_key=True)
     ultima_versao_notificada = Column(String, nullable=True)
     criado_em = Column(DateTime, default=datetime.utcnow)
+
+
+class SnapshotDiario(Base):
+    """Foto do que cada marca fez em UM dia, gravada uma vez e nunca reescrita. `DailyMetric`
+    é dado vivo (o Meta reatribui lead por alguns dias, então o número de ontem muda depois);
+    aqui fica o que se enxergava na manhã seguinte, pra comparar e pra ter registro histórico.
+    `fonte`: "congelado" = gravado pelo sistema na manhã seguinte; "reconstruido" = montado
+    depois a partir de `DailyMetric` (dias anteriores à existência desta tabela)."""
+
+    __tablename__ = "snapshot_diario"
+    __table_args__ = (UniqueConstraint("brand_id", "data", name="uq_snapshot_brand_data"),)
+
+    id = Column(Integer, primary_key=True)
+    brand_id = Column(Integer, ForeignKey("brands.id"), nullable=False)
+    data = Column(Date, nullable=False)
+    gasto = Column(Float, default=0)
+    leads_formulario = Column(Integer, default=0)
+    leads_whatsapp = Column(Integer, default=0)
+    saldo_conta = Column(Float, nullable=True)
+    orcamento_planejado = Column(Float, nullable=True)
+    orcamento_real = Column(Float, nullable=True)
+    fonte = Column(String, default="congelado")
+    criado_em = Column(DateTime, default=datetime.utcnow)
+
+    brand = relationship("Brand")
+
+
+class RelatorioDiario(Base):
+    """Texto do relatório consolidado de um dia (tabela por marca), congelado junto com os
+    `SnapshotDiario` desse dia."""
+
+    __tablename__ = "relatorios_diarios"
+
+    id = Column(Integer, primary_key=True)
+    data = Column(Date, nullable=False, unique=True)
+    texto = Column(String, nullable=False)
+    total_gasto = Column(Float, default=0)
+    total_leads = Column(Integer, default=0)
+    fonte = Column(String, default="congelado")
+    criado_em = Column(DateTime, default=datetime.utcnow)
+
+
+class CampanhaDailyMetric(Base):
+    """Gasto e leads por CAMPANHA por dia. Sem isto, qualquer análise abaixo do nível de marca
+    (qual campanha piorou, a troca de estrutura da Nissan) precisava ir ao vivo na API do Meta.
+    `orcamento_diario` é o orçamento configurado NO MOMENTO da sincronização, só gravado pros dias
+    correntes (ontem/hoje) — o Meta não devolve o orçamento de dias passados, então nos demais
+    fica nulo em vez de gravar um valor que não era o da época.
+
+    Ressalva sobre o que veio da carga retroativa (24/06 a 25/09/2026, `backfill_campanhas.py`):
+    campanhas apagadas depois não existem mais na API do Meta (não entraram), e o canal WhatsApp
+    das antigas foi classificado pelo destino que o conjunto tem HOJE. Pro total por marca de um
+    período passado, `DailyMetric` continua sendo a fonte de verdade; esta tabela é o detalhamento.
+    O que é gravado pela sincronização a partir de 25/09/2026 segue a mesma regra do `DailyMetric`."""
+
+    __tablename__ = "campanha_daily_metrics"
+    __table_args__ = (UniqueConstraint("brand_id", "campanha", "data", name="uq_campanha_brand_data"),)
+
+    id = Column(Integer, primary_key=True)
+    brand_id = Column(Integer, ForeignKey("brands.id"), nullable=False)
+    campaign_id = Column(String, nullable=True)
+    campanha = Column(String, nullable=False)
+    data = Column(Date, nullable=False)
+    gasto = Column(Float, default=0)
+    leads_formulario = Column(Integer, default=0)
+    leads_whatsapp = Column(Integer, default=0)
+    destino = Column(String, nullable=True)  # "WHATSAPP" | "MESSENGER" | nulo (formulário/outros)
+    orcamento_diario = Column(Float, nullable=True)
+    atualizado_em = Column(DateTime, default=datetime.utcnow)
+
+    brand = relationship("Brand")
+
+
+class SaldoHistorico(Base):
+    """Saldo de cada conta de anúncio, um valor por dia (a última leitura do dia). `SaldoCache`
+    só guarda o valor atual e sobrescreve."""
+
+    __tablename__ = "saldo_historico"
+    __table_args__ = (UniqueConstraint("ad_account_id", "data", name="uq_saldo_conta_data"),)
+
+    id = Column(Integer, primary_key=True)
+    ad_account_id = Column(Integer, ForeignKey("ad_accounts.id"), nullable=False)
+    data = Column(Date, nullable=False)
+    saldo = Column(Float, default=0)
+    atualizado_em = Column(DateTime, default=datetime.utcnow)
+
+    ad_account = relationship("AdAccount")

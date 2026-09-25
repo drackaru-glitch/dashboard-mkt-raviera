@@ -5,6 +5,7 @@ from pathlib import Path
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from fastapi import FastAPI
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
@@ -13,10 +14,12 @@ from sqlalchemy import inspect, text
 from app.database import Base, SessionLocal, engine
 from app.models import Notificacao, SaldoCache, SistemaEstado
 from app.notas_versao import NOTAS_VERSAO
-from app.routers import admin_router, auth_router, dashboard_router, followize_router, letalk_router, notificacoes_router
+from app.routers import (
+    admin_router, auth_router, dashboard_router, followize_router, historico_router, letalk_router, notificacoes_router,
+)
 from app.sync import DIAS_JANELA_SYNC_PADRAO, SyncEmAndamento, _sync_news, sync_all
 
-VERSAO_ATUAL = "0.58"
+VERSAO_ATUAL = "0.59"
 
 Base.metadata.create_all(bind=engine)
 
@@ -51,6 +54,17 @@ def _migrar_colunas_novas():
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE token_saude ADD COLUMN alertado BOOLEAN"))
 
+    colunas_ad_accounts = {c["name"] for c in inspect(engine).get_columns("ad_accounts")}
+    if "billing_business_id" not in colunas_ad_accounts:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE ad_accounts ADD COLUMN billing_business_id VARCHAR"))
+    if "billing_asset_id" not in colunas_ad_accounts:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE ad_accounts ADD COLUMN billing_asset_id VARCHAR"))
+    if "billing_payment_account_id" not in colunas_ad_accounts:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE ad_accounts ADD COLUMN billing_payment_account_id VARCHAR"))
+
 
 def _checar_nova_versao():
     """Compara a versão rodando agora com a última que o sino já avisou. Diferente = alguém
@@ -79,12 +93,31 @@ _checar_nova_versao()
 
 app = FastAPI(title="FEFO API", version=VERSAO_ATUAL)
 
+
+class _GzipSoParaTexto:
+    """Comprime só a API e a página (JSON e HTML, que comprimem ~9x: o /api/dashboard passa de 3,1 MB
+    pra ~370 KB). Vídeo e imagem já são comprimidos — passar por gzip só gasta processador à toa."""
+
+    def __init__(self, app):
+        self.asgi_app = app
+        self.gzip = GZipMiddleware(app, minimum_size=1000)
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and (scope["path"].startswith("/api") or scope["path"] == "/"):
+            await self.gzip(scope, receive, send)
+        else:
+            await self.asgi_app(scope, receive, send)
+
+
+app.add_middleware(_GzipSoParaTexto)
+
 app.include_router(auth_router.router)
 app.include_router(admin_router.router)
 app.include_router(dashboard_router.router)
 app.include_router(followize_router.router)
 app.include_router(letalk_router.router)
 app.include_router(notificacoes_router.router)
+app.include_router(historico_router.router)
 
 
 def _rodar_sync_news_agendado():

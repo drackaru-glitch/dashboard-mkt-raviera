@@ -6,6 +6,9 @@ from pydantic import BaseModel, EmailStr
 class AdAccountIn(BaseModel):
     meta_account_id: str
     nome: str
+    billing_business_id: Optional[str] = None
+    billing_asset_id: Optional[str] = None
+    billing_payment_account_id: Optional[str] = None
 
 
 class AdAccountOut(AdAccountIn):

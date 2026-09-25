@@ -4,6 +4,45 @@ Registro de versões do projeto. Uma versão nova é criada a cada conjunto de a
 
 ---
 
+## 0.59 — 2026-09-25
+
+### Correção: fôlego de saldo por CONTA (não por marca)
+- O saldo pré-pago é da conta de anúncio, mas o runway dividia o saldo da conta só pelo orçamento planejado de UMA marca. Em conta compartilhada isso inflava os dias: BMW Auto + Motorrad + MINI mostravam 12,4 dias pra Motorrad e MINI numa conta que durava ~4; Ram mostrava 19,7 dias em cada marca (real ~9). O alerta de saldo crítico da BMW só saiu com R$ 0,74 na conta, e saía triplicado (uma por marca).
+- Novo `app/runway.py`: saldo da conta ÷ gasto real recente da conta INTEIRA (maior entre a média de 7 e a de 3 dias fechados — subir orçamento ontem quase não move uma média de 7 dias). Sem gasto recente cai no orçamento planejado; sem nenhum dos dois, "—".
+- O rodapé "Saldo Atual" somava a mesma conta duas ou três vezes (R$ 13.794 contra R$ 10.645 reais) — agora cada conta entra uma vez. "Contas em alerta de saldo" passa a contar contas, não marcas.
+- Tooltip do runway mostra o ritmo usado, quem divide a conta e quanto falta pra cobrir até o fim do mês.
+- Alerta de saldo crítico agora é um por conta, com o ritmo real e o valor que falta, preso à primeira marca da conta.
+
+### Novo: histórico persistente (consulta sem chamar o Meta)
+- Tabelas `snapshot_diario` e `relatorios_diarios`: relatório consolidado do dia anterior (tabela por marca com gasto, leads, CPL e saldo), gravado uma vez e nunca reescrito. Só congela depois das 06h e logo após uma sincronização de verdade — sem isso congelaria dado parcial (aconteceu num teste: R$ 1.388 contra R$ 2.372 reais). Dias anteriores foram reconstruídos do `daily_metrics` e marcados como `reconstruido`.
+- `campanha_daily_metrics` (gasto/leads por campanha e dia, gravado a cada sincronização a partir dos insights que já eram buscados) e `saldo_historico` (saldo por conta por dia; só existe de 25/09/2026 em diante — o Meta não devolve saldo do passado).
+- Carga retroativa por campanha (`backfill_campanhas.py`, 24/06 a 25/09): não recupera campanha apagada depois no Meta e classifica o canal WhatsApp pelo destino atual do conjunto; pra total por marca de período passado `daily_metrics` segue sendo a fonte de verdade (ressalva no docstring do modelo).
+- API `/api/historico/{relatorios,snapshots,campanhas}` com o mesmo controle de acesso por marca; o texto consolidado (todas as marcas) é só admin.
+
+### Novo: tabela "Comparativo por Marca"
+- Aparece só quando o período "Comparativo" está selecionado, e só nesse momento busca no histórico. Compara dias FECHADOS (até ontem) com o mesmo número de dias do período anterior, com gasto/leads/CPL, variação (verde/vermelho conforme melhor ou pior; gasto neutro), total, ordenação por coluna e filtro de marca.
+
+### Novo: edição de marca em Configuração
+- Só dava pra criar e excluir marca (excluir apaga o histórico dela), então orçamento planejado, filtro de campanha e analista ficavam congelados. Agora tem edição inline; o servidor recusa nome duplicado.
+- Texto de ajuda do filtro corrigido ("contém o trecho", não "prefixo"; "!" exclui).
+
+### Novo: alerta "Gasto sem marca"
+- Campanha que nenhuma marca da conta reivindica sumia do painel sem erro (R$ 308,98 em setembro). A sincronização agora avisa (uma vez por conta por dia, mínimo R$ 30) listando as maiores.
+- Dado, não código: o filtro da Motorrad Dourados passou de "BMW MOTORRAD DOURADOS" pra "MOTORRAD" (as campanhas dela se chamam "LEAD | MOTORRAD | ...", sem "DOURADOS"). É configuração no banco, feita pela tela nova — em outra instalação precisa ser repetida.
+
+### Desempenho
+- Compressão gzip só em `/api` e na página (JSON e HTML): `/api/dashboard` de 3,1 MB pra ~370 KB, `index.html` de 272 KB pra ~63 KB. Vídeo e imagem ficam de fora.
+
+### Tela de login
+- Vídeo do menino ao lado do card (WebM com transparência real, recortado de fundo verde com despill; toca uma vez e para no gesto final, some em tela estreita). Safari não suporta WebM com alpha — lá o vídeo simplesmente não aparece.
+- `deploy/iniciar-fefo-windows.bat` pra subir o FEFO localmente no Windows.
+
+### Outros
+- Coluna "Analista" na tabela de Saldo (ordenável), botão de seta com link direto pra Nota Fiscal do Meta (3 IDs por conta em Configuração, copiados da URL — não existe na API), cabeçalhos do comparativo renomeados ("Gasto ant.", "Leads ant.", "CPL ant.") e ano exibido quando o período comparado é de outro ano.
+- Não corrigido (ver revisão): paginação da API do Meta (18 de 19 contas passam de 200 anúncios; nada ativo se perde hoje), aspa no nome de campanha quebra o diagnóstico, rótulos sobrepostos no gráfico de ranking em tela estreita, orçamento vitalício lido como R$ 0 (Consórcio).
+
+---
+
 ## 0.58 — 2026-09-15
 
 ### Diagnóstico de campanha (Meta Ads)

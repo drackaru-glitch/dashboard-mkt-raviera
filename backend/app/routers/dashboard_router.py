@@ -34,7 +34,7 @@ from app.models import (
 )
 from app.news_client import MARCAS_CHAVE
 from app import concorrentes as concorrentes_svc
-from app import notificacoes
+from app import notificacoes, runway
 from app.sync import SyncEmAndamento, sync_all
 
 if not META_DEMO_MODE:
@@ -163,8 +163,14 @@ def get_dashboard(user: User = Depends(get_current_user), db: Session = Depends(
             if inicio_janela_orc <= m.data <= ontem:
                 gastos_recentes_por_marca.setdefault(m.brand_id, []).append(m.gasto)
 
+    # Fôlego por CONTA (saldo é da conta, não da marca — ver app.runway). Calculado com todas as
+    # marcas da conta, mesmo as que este usuário não enxerga; pra ele só sai a contagem delas.
+    runway_por_conta = runway.calcular_por_conta(db)
+    nomes_visiveis = {b.id for b in brands}
+
     saldos = []
     for b in brands:
+        conta_runway = runway_por_conta.get(b.ad_account_id) if b.ad_account_id else None
         cache = (
             db.query(SaldoCache).filter(SaldoCache.ad_account_id == b.ad_account_id).first()
             if b.ad_account_id
@@ -179,6 +185,18 @@ def get_dashboard(user: User = Depends(get_current_user), db: Session = Depends(
             and len(gastos_recentes) >= notificacoes.ORCAMENTO_SUBUTILIZADO_DIAS
             and (gasto_medio_recente / b.orcamento_diario_real) <= notificacoes.LIMIAR_ORCAMENTO_SUBUTILIZADO
         )
+        # Link direto pra tela de Nota Fiscal no Gerenciador de Negócios — só existe quando os
+        # 3 IDs foram preenchidos à mão em Configuração (não tem como buscar isso pela API, ver
+        # comentário em app.models.AdAccount). Conta compartilhada entre marcas (ex.: BMW Auto +
+        # Motorrad + MINI) tem o mesmo link pras três, porque a nota fiscal é da conta inteira.
+        conta = b.ad_account
+        nota_fiscal_url = None
+        if conta and conta.billing_business_id and conta.billing_asset_id and conta.billing_payment_account_id:
+            nota_fiscal_url = (
+                "https://adsmanager.facebook.com/adsmanager/billing_hub/payment_activity"
+                f"?asset_id={conta.billing_asset_id}&business_id={conta.billing_business_id}"
+                f"&payment_account_id={conta.billing_payment_account_id}&placement=BILLING_HUB&entity=NotaFiscal"
+            )
         saldos.append(
             {
                 "brandId": b.id,
@@ -190,6 +208,18 @@ def get_dashboard(user: User = Depends(get_current_user), db: Session = Depends(
                 "orcamentoAtualizadoEm": _iso_utc(b.orcamento_atualizado_em),
                 "gastoMedioRecente": gasto_medio_recente,
                 "orcamentoSubutilizado": orcamento_subutilizado,
+                "notaFiscalUrl": nota_fiscal_url,
+                "contaId": b.ad_account_id,
+                "marcasNaConta": (
+                    [m.nome for m in conta_runway["marcas"] if m.id in nomes_visiveis and m.id != b.id]
+                    if conta_runway else []
+                ),
+                "totalMarcasNaConta": len(conta_runway["marcas"]) if conta_runway else 1,
+                "runwayDias": conta_runway["dias"] if conta_runway else None,
+                "ritmoDiario": conta_runway["ritmo"] if conta_runway else None,
+                "ritmoFonte": conta_runway["ritmoFonte"] if conta_runway else None,
+                "faltaAteFimDoMes": conta_runway["faltaAteFimDoMes"] if conta_runway else 0,
+                "diasAteFimDoMes": conta_runway["diasAteFimDoMes"] if conta_runway else 0,
             }
         )
 
