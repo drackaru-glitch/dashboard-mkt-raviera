@@ -4,6 +4,10 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>FEFO</title>
+<link rel="icon" type="image/png" sizes="16x16" href="/static/assets/favicon-16.png" />
+<link rel="icon" type="image/png" sizes="32x32" href="/static/assets/favicon-32.png" />
+<link rel="icon" type="image/png" sizes="48x48" href="/static/assets/favicon-48.png" />
+<link rel="apple-touch-icon" sizes="180x180" href="/static/assets/favicon-180.png" />
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
@@ -1063,7 +1067,10 @@ function LoginScreen({ onLogin }) {
         {error && <div className="text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-md px-3 py-2">{error}</div>}
         <div className="flex flex-col gap-1">
           <label className="text-xs font-medium text-neutral-400">E-mail</label>
-          <input type="email" required value={email} onChange={(e) => setEmail(e.target.value)}
+          {/* type="text", não "email": o backend aceita qualquer login (ver User.email em
+              auth_router.py), e alguns logins simplificados (ex.: "rena") não têm "@" — com
+              type="email" o próprio navegador bloqueava o envio antes de chegar no servidor. */}
+          <input type="text" autoComplete="username" required value={email} onChange={(e) => setEmail(e.target.value)}
             className="px-3 py-2 rounded-md bg-neutral-800 border border-neutral-700 text-sm" />
         </div>
         <div className="flex flex-col gap-1">
@@ -2743,6 +2750,48 @@ function RedesSociaisDashboard({ token, dark, cardBg, mutedText, pushToast }) {
   );
 }
 
+// Cartão de um criativo do concorrente. Sem imagem — a coleta só tem o texto visível da
+// Biblioteca de Anúncios (ver concorrentes_parser.py) — mas o link abre o anúncio original
+// pelo "Identificação da biblioteca", onde dá pra ver a imagem/vídeo de verdade em 1 clique.
+function AnuncioCard({ a, dark, mutedText, fmtData, oferta }) {
+  const [expandido, setExpandido] = useState(false);
+  const textoLongo = (a.texto || "").length > 160;
+  const linkBiblioteca = "https://www.facebook.com/ads/library/?id=" + a.id;
+  const temOferta = oferta(a) !== "—";
+  return (
+    <div className={"rounded-lg border p-3 flex flex-col gap-2 " + (dark ? "border-neutral-800 bg-neutral-900/40" : "border-neutral-200 bg-neutral-50")}>
+      <div className="flex items-start justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className={"text-[10px] px-1.5 py-0.5 rounded font-semibold " + corTipo(a.tipoCampanha || "Geral", dark)}>
+            {a.tipoCampanha || "Geral"}
+          </span>
+          {a.diasNoAr !== null && (
+            <span className={"text-[10px] " + (a.diasNoAr >= 30 ? "font-bold text-emerald-600" : mutedText)}>{a.diasNoAr}d no ar</span>
+          )}
+        </div>
+        <a href={linkBiblioteca} target="_blank" rel="noopener noreferrer" title="Ver anúncio original na Biblioteca do Meta (com a imagem/vídeo)"
+          className={"p-1 rounded transition-colors shrink-0 " + (dark ? "text-neutral-500 hover:text-neutral-300" : "text-neutral-400 hover:text-neutral-600")}>
+          <IconArrowUp className="h-3 w-3 rotate-45" />
+        </a>
+      </div>
+      <p className="text-sm font-semibold leading-snug">{a.modelo || "Sem modelo identificado"}</p>
+      {temOferta && <p className="text-sm font-bold text-emerald-600 tabular-nums">{oferta(a)}</p>}
+      {a.texto && (
+        <p className={"text-xs leading-snug " + mutedText + (expandido ? "" : " line-clamp-3")}>{a.texto}</p>
+      )}
+      {textoLongo && (
+        <button onClick={() => setExpandido((v) => !v)} className="text-[11px] font-semibold text-orange-600 text-left hover:underline">
+          {expandido ? "ver menos" : "ver mais"}
+        </button>
+      )}
+      <div className={"flex items-center justify-between text-[10px] pt-1.5 border-t " + (dark ? "border-neutral-800 text-neutral-500" : "border-neutral-200 text-neutral-400")}>
+        <span>Desde {fmtData(a.inicio)}</span>
+        <span className="truncate ml-2">{a.cta || a.dominio || "—"}</span>
+      </div>
+    </div>
+  );
+}
+
 function ConcorrenciaDashboard({ token, dark, cardBg, mutedText, pushToast, role }) {
   const [dados, setDados] = useState({ concorrentes: [] });
   const [loading, setLoading] = useState(true);
@@ -2752,6 +2801,27 @@ function ConcorrenciaDashboard({ token, dark, cardBg, mutedText, pushToast, role
   const [selecionadas, setSelecionadas] = useState([]);
   const [ocupado, setOcupado] = useState(false);
   const [expandido, setExpandido] = useState({});
+  const [buscaConcorrente, setBuscaConcorrente] = useState("");
+  const [marcaRivalFiltro, setMarcaRivalFiltro] = useState("");
+  const [cidadeFiltro, setCidadeFiltro] = useState("");
+  const [tiposFiltro, setTiposFiltro] = useState([]);
+  const [confirm, setConfirm] = useState(null);
+  function askConfirm(message, action) { setConfirm({ message, action }); }
+  function handleConfirm() {
+    const action = confirm && confirm.action;
+    setConfirm(null);
+    if (action) action();
+  }
+
+  async function excluirConcorrente(c) {
+    try {
+      await authJson(`/admin/concorrentes/${c.id}`, token, { method: "DELETE" });
+      pushToast(`"${c.nome}" removido da coleta.`, "success");
+      carregar();
+    } catch (e) {
+      pushToast(e.message, "error");
+    }
+  }
 
   async function carregar() {
     setLoading(true);
@@ -2809,29 +2879,119 @@ function ConcorrenciaDashboard({ token, dark, cardBg, mutedText, pushToast, role
 
   if (loading) return <div className={"text-sm " + mutedText}>Carregando…</div>;
 
-  const totalAtivos = dados.concorrentes.reduce((a, c) => a + c.ativos, 0);
   const semDados = !dados.concorrentes.length;
+  const buscaNorm = buscaConcorrente.trim().toLowerCase();
+
+  // Opções dos filtros vêm dos dados carregados, não de uma lista fixa — só aparece pra
+  // escolher o que de fato existe na coleta de hoje.
+  const marcasRivais = [...new Set(dados.concorrentes.map((c) => c.marcaRival).filter(Boolean))].sort((a, b) => a.localeCompare(b, "pt-BR"));
+  const cidades = [...new Set(dados.concorrentes.map((c) => c.cidade).filter(Boolean))].sort((a, b) => a.localeCompare(b, "pt-BR"));
+  const tiposDisponiveis = [...new Set(dados.concorrentes.flatMap((c) => Object.values(c.grade || {}).flatMap((t) => Object.keys(t))))].sort((a, b) => a.localeCompare(b, "pt-BR"));
+
+  function toggleTipo(t) { setTiposFiltro((v) => v.includes(t) ? v.filter((x) => x !== t) : [...v, t]); }
+  const temFiltroAtivo = Boolean(buscaNorm || marcaRivalFiltro || cidadeFiltro || tiposFiltro.length);
+  function limparFiltros() { setBuscaConcorrente(""); setMarcaRivalFiltro(""); setCidadeFiltro(""); setTiposFiltro([]); }
+
+  const concorrentesFiltrados = dados.concorrentes
+    .filter((c) => {
+      if (marcaRivalFiltro && c.marcaRival !== marcaRivalFiltro) return false;
+      if (cidadeFiltro && c.cidade !== cidadeFiltro) return false;
+      if (buscaNorm) {
+        const modelos = Object.keys(c.grade || {});
+        if (!([c.nome, c.marcaChave, c.cidade, c.pagina, ...modelos].filter(Boolean).some((v) => v.toLowerCase().includes(buscaNorm)))) return false;
+      }
+      if (tiposFiltro.length && !c.anuncios.some((a) => tiposFiltro.includes(a.tipoCampanha || "Geral"))) return false;
+      return true;
+    })
+    .map((c) => {
+      if (!tiposFiltro.length) return c;
+      // Recorta o card pra mostrar só os anúncios do tipo escolhido, não o concorrente inteiro —
+      // é isso que de fato "segmenta": ver só a fatia de Consórcio, Taxa 0% etc. de cada um.
+      const anunciosFiltrados = c.anuncios.filter((a) => tiposFiltro.includes(a.tipoCampanha || "Geral"));
+      const gradeFiltrada = {};
+      anunciosFiltrados.forEach((a) => {
+        const modelo = a.modelo || "Outros";
+        const tipo = a.tipoCampanha || "Geral";
+        gradeFiltrada[modelo] = gradeFiltrada[modelo] || {};
+        gradeFiltrada[modelo][tipo] = (gradeFiltrada[modelo][tipo] || 0) + 1;
+      });
+      return {
+        ...c,
+        anuncios: anunciosFiltrados,
+        grade: gradeFiltrada,
+        ativos: anunciosFiltrados.length,
+        encerrados: c.encerrados.filter((a) => tiposFiltro.includes(a.tipoCampanha || "Geral")),
+      };
+    });
+  const totalAtivosFiltrado = concorrentesFiltrados.reduce((a, c) => a + c.ativos, 0);
+  const semResultadoBusca = !semDados && temFiltroAtivo && concorrentesFiltrados.length === 0;
+
+  const selectCls = "px-2 py-1.5 rounded-md border text-xs " + (dark ? "bg-neutral-800 border-neutral-700 text-neutral-100" : "bg-white border-neutral-200 text-neutral-900");
 
   return (
     <div className="flex flex-col gap-4">
-      <div className={"neon-top rounded-xl border p-3 flex flex-wrap items-center gap-3 " + (dark ? "is-dark " : "") + cardBg} style={{ "--neon": "#f97316" }}>
-        <div className="flex items-center gap-1.5">
-          <IconTarget className="h-4 w-4 text-orange-500" />
-          <span className="text-sm font-bold">Insights da Concorrência</span>
-        </div>
-        <span className={"text-xs " + mutedText}>
-          {dados.concorrentes.length} concorrente{dados.concorrentes.length === 1 ? "" : "s"} · {totalAtivos} anúncio{totalAtivos === 1 ? "" : "s"} ativo{totalAtivos === 1 ? "" : "s"}
-        </span>
-        <div className="ml-auto flex items-center gap-2">
-          <button onClick={carregar} className={"px-3 py-1.5 rounded-md text-xs font-semibold border " + (dark ? "bg-neutral-800 border-neutral-700 text-neutral-200" : "bg-neutral-100 border-neutral-200 text-neutral-700")}>
-            Atualizar
-          </button>
-          {role === "admin" && (
-            <button onClick={() => setImportOpen(true)} className="px-3 py-1.5 rounded-md text-xs font-semibold bg-blue-600 text-white">
-              Importar coleta
+      <div className={"neon-top rounded-xl border p-3 flex flex-col gap-3 " + (dark ? "is-dark " : "") + cardBg} style={{ "--neon": "#f97316" }}>
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-1.5">
+            <IconTarget className="h-4 w-4 text-orange-500" />
+            <span className="text-sm font-bold">Insights da Concorrência</span>
+          </div>
+          <span className={"text-xs " + mutedText}>
+            {concorrentesFiltrados.length} concorrente{concorrentesFiltrados.length === 1 ? "" : "s"} · {totalAtivosFiltrado} anúncio{totalAtivosFiltrado === 1 ? "" : "s"} ativo{totalAtivosFiltrado === 1 ? "" : "s"}
+            {temFiltroAtivo && " (de " + dados.concorrentes.length + ")"}
+          </span>
+          <div className="ml-auto flex items-center gap-2">
+            <button onClick={carregar} className={"px-3 py-1.5 rounded-md text-xs font-semibold border " + (dark ? "bg-neutral-800 border-neutral-700 text-neutral-200" : "bg-neutral-100 border-neutral-200 text-neutral-700")}>
+              Atualizar
             </button>
-          )}
+            {role === "admin" && (
+              <button onClick={() => setImportOpen(true)} className="px-3 py-1.5 rounded-md text-xs font-semibold bg-blue-600 text-white">
+                Importar coleta
+              </button>
+            )}
+          </div>
         </div>
+
+        {!semDados && (
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="relative">
+              <input placeholder="Buscar concorrente ou modelo..." value={buscaConcorrente} onChange={(e) => setBuscaConcorrente(e.target.value)}
+                className={"px-2 py-1.5 pr-7 rounded-md border text-xs w-52 " + (dark ? "bg-neutral-800 border-neutral-700 text-neutral-100 placeholder:text-neutral-500" : "bg-white border-neutral-200 text-neutral-900 placeholder:text-neutral-400")} />
+              {buscaConcorrente && (
+                <button onClick={() => setBuscaConcorrente("")} title="Limpar busca" aria-label="Limpar busca"
+                  className={"absolute right-1.5 top-1/2 -translate-y-1/2 p-0.5 rounded " + (dark ? "text-neutral-500 hover:text-neutral-300" : "text-neutral-400 hover:text-neutral-600")}>
+                  <IconX className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
+            {marcasRivais.length > 0 && (
+              <select value={marcaRivalFiltro} onChange={(e) => setMarcaRivalFiltro(e.target.value)} className={selectCls}>
+                <option value="">Marca: todas</option>
+                {marcasRivais.map((m) => <option key={m} value={m}>{m}</option>)}
+              </select>
+            )}
+            {cidades.length > 0 && (
+              <select value={cidadeFiltro} onChange={(e) => setCidadeFiltro(e.target.value)} className={selectCls}>
+                <option value="">Cidade: todas</option>
+                {cidades.map((c) => <option key={c} value={c}>{c}</option>)}
+              </select>
+            )}
+            <div className="flex flex-wrap gap-1">
+              {tiposDisponiveis.map((t) => (
+                <button key={t} onClick={() => toggleTipo(t)}
+                  className={"text-[11px] px-2 py-1 rounded-md font-semibold border transition-colors " +
+                    (tiposFiltro.includes(t) ? "border-orange-500 " + corTipo(t, dark) : (dark ? "border-neutral-700 text-neutral-500 hover:text-neutral-300" : "border-neutral-200 text-neutral-500 hover:text-neutral-700"))}>
+                  {t}
+                </button>
+              ))}
+            </div>
+            {temFiltroAtivo && (
+              <button onClick={limparFiltros} className={"text-xs px-2 py-1.5 rounded-md font-semibold flex items-center gap-1 " + (dark ? "text-neutral-400 hover:text-neutral-200" : "text-neutral-500 hover:text-neutral-700")}>
+                <IconX className="h-3 w-3" /> Limpar filtros
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       {semDados && (
@@ -2847,7 +3007,14 @@ function ConcorrenciaDashboard({ token, dark, cardBg, mutedText, pushToast, role
         </div>
       )}
 
-      {dados.concorrentes.map((c) => {
+      {semResultadoBusca && (
+        <div className={"rounded-xl border p-6 text-center " + cardBg}>
+          <p className={"text-sm mb-2 " + mutedText}>Nenhum concorrente encontrado com esse filtro{buscaNorm ? ` pra "${buscaConcorrente}"` : ""}.</p>
+          <button onClick={limparFiltros} className="text-xs font-semibold text-orange-600 hover:underline">Limpar filtros</button>
+        </div>
+      )}
+
+      {concorrentesFiltrados.map((c) => {
         const modelos = Object.keys(c.grade).sort();
         const aberto = expandido[c.id];
         return (
@@ -2860,9 +3027,18 @@ function ConcorrenciaDashboard({ token, dark, cardBg, mutedText, pushToast, role
                   {c.marcaRival && <span> · concorre com <b>{c.marcaRival}</b></span>}
                 </p>
               </div>
-              <div className="text-right">
-                <p className="text-xl font-bold tabular-nums">{c.ativos}</p>
-                <p className={"text-[10px] uppercase tracking-wide " + mutedText}>anúncios ativos</p>
+              <div className="flex items-start gap-2">
+                {role === "admin" && (
+                  <button onClick={() => askConfirm(`Excluir o concorrente "${c.nome}"? Todo o histórico de criativos coletados dele será perdido.`, () => excluirConcorrente(c))}
+                    className={"p-1.5 rounded-md transition-colors " + (dark ? "text-red-400 hover:bg-red-500/10" : "text-red-500 hover:bg-red-50")}
+                    title="Excluir concorrente" aria-label="Excluir concorrente">
+                    <IconTrash className="h-3.5 w-3.5" />
+                  </button>
+                )}
+                <div className="text-right">
+                  <p className="text-xl font-bold tabular-nums">{c.ativos}</p>
+                  <p className={"text-[10px] uppercase tracking-wide " + mutedText}>anúncios ativos</p>
+                </div>
               </div>
             </div>
 
@@ -2925,39 +3101,12 @@ function ConcorrenciaDashboard({ token, dark, cardBg, mutedText, pushToast, role
             </button>
 
             {aberto && (
-              <div className="overflow-x-auto mt-3">
-                <table className="w-full text-sm min-w-[720px]">
-                  <thead>
-                    <tr className={"text-left text-[10px] uppercase tracking-wide " + mutedText}>
-                      <th className="pb-2">Início</th>
-                      <th className="pb-2">Dias no ar</th>
-                      <th className="pb-2">Modelo</th>
-                      <th className="pb-2">Campanha</th>
-                      <th className="pb-2">Oferta</th>
-                      <th className="pb-2">Destino</th>
-                    </tr>
-                  </thead>
-                  <tbody className={"divide-y " + (dark ? "divide-neutral-800" : "divide-neutral-100")}>
-                    {c.anuncios.map((a) => (
-                      <tr key={a.id} title={a.texto}>
-                        <td className="py-2 tabular-nums">{fmtData(a.inicio)}</td>
-                        <td className="py-2 tabular-nums">
-                          {a.diasNoAr !== null ? (
-                            <span className={a.diasNoAr >= 30 ? "font-bold text-emerald-600" : ""}>{a.diasNoAr}d</span>
-                          ) : "—"}
-                        </td>
-                        <td className="py-2 font-semibold">{a.modelo || "—"}</td>
-                        <td className="py-2">
-                          <span className={"text-[10px] px-1.5 py-0.5 rounded " + corTipo(a.tipoCampanha || "Geral", dark)}>
-                            {a.tipoCampanha || "Geral"}
-                          </span>
-                        </td>
-                        <td className="py-2 tabular-nums">{oferta(a)}</td>
-                        <td className={"py-2 text-[11px] " + mutedText}>{a.cta || a.dominio || "—"}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+              <div className="mt-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {c.anuncios.map((a) => (
+                    <AnuncioCard key={a.id} a={a} dark={dark} mutedText={mutedText} fmtData={fmtData} oferta={oferta} />
+                  ))}
+                </div>
                 {c.encerrados.length > 0 && (
                   <div className="mt-3">
                     <p className={"text-[10px] uppercase tracking-wide mb-1 " + mutedText}>Saíram do ar recentemente</p>
@@ -3030,6 +3179,8 @@ function ConcorrenciaDashboard({ token, dark, cardBg, mutedText, pushToast, role
           </div>
         </div>
       )}
+
+      <ConfirmModal confirm={confirm} dark={dark} onCancel={() => setConfirm(null)} onConfirm={handleConfirm} />
     </div>
   );
 }
