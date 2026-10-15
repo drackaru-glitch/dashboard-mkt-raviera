@@ -464,7 +464,10 @@ def get_google_dashboard(user: User = Depends(get_current_user), db: Session = D
                 "status": cache.status if cache else "",
                 "orcamentoMensal": b.google_orcamento_mensal,
                 "gastoMesAtual": gasto_mes,
-                "saldoAtual": b.google_orcamento_mensal - gasto_mes,
+                # Saldo informado pelo próprio Google (limite aprovado − já gasto). None = a conta
+                # não tem esse dado; a tela mostra "—". Não é mais orçamento mensal − gasto do mês.
+                "saldoAtual": cache.saldo if cache else None,
+                "saldoAtualizadoEm": _iso_utc(cache.atualizado_em) if cache else None,
             }
         )
 

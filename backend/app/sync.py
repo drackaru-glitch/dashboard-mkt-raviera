@@ -456,14 +456,28 @@ def _sync_all(db: Session, days: int = DIAS_JANELA_SYNC_PADRAO) -> dict:
         print(f"[sync] falha ao sincronizar redes sociais: {exc}")
         comentarios_novos = 0
 
+    erros_google: list[tuple[str, str]] = []
     try:
-        contas_google = _sync_google_ads(db, days)
+        contas_google = _sync_google_ads(db, days, erros_google)
         db.commit()
     except Exception as exc:
         db.rollback()
         falhas.append(f"Google Ads: {exc}")
         print(f"[sync] falha ao sincronizar Google Ads: {exc}")
         contas_google = 0
+    falhas.extend(_resumir_falhas_google(erros_google))
+
+    # Depois da sincronização do Google, porque é aqui que o saldo novo chega: avisa quando uma
+    # conta zera (ver notificacoes.gerar_alertas_saldo_google).
+    try:
+        alertas_saldo_google = notificacoes.gerar_alertas_saldo_google(db)
+        db.commit()
+        if alertas_saldo_google:
+            print(f"[sync] {alertas_saldo_google} alerta(s) de saldo zerado no Google Ads")
+    except Exception as exc:
+        db.rollback()
+        falhas.append(f"Alerta de saldo Google: {exc}")
+        print(f"[sync] falha ao gerar alerta de saldo do Google: {exc}")
 
     try:
         marcas_funil = _sync_funil(db, days)
@@ -530,7 +544,24 @@ def _demo_google_row_for_brand(brand: Brand, day: date, rng: random.Random) -> d
     return {"gasto": gasto, "cliques": cliques, "conversoes": conversoes}
 
 
-def _sync_google_ads(db: Session, days: int) -> int:
+def _resumir_falhas_google(erros: list[tuple[str, str]]) -> list[str]:
+    """Contas Google que falharam pelo MESMO motivo viram UMA linha de aviso (token revogado
+    derruba as 13 de uma vez — são 13 linhas iguais no sino, ou uma dizendo quantas e quais)."""
+    por_motivo: dict[str, list[str]] = {}
+    for nome, erro in erros:
+        por_motivo.setdefault(erro[:180], []).append(nome)
+    resumo = []
+    for motivo, nomes in por_motivo.items():
+        quem = ", ".join(nomes[:3]) + (f" e mais {len(nomes) - 3}" if len(nomes) > 3 else "")
+        resumo.append(f"Google Ads ({len(nomes)} conta{'s' if len(nomes) != 1 else ''}: {quem}): {motivo}")
+    return resumo
+
+
+def _sync_google_ads(db: Session, days: int, erros: list[tuple[str, str]] | None = None) -> int:
+    """Devolve quantas contas sincronizaram. Se `erros` for passado, recebe (nome da conta,
+    erro) de cada conta que falhou — sem isso a falha só ia pro log do servidor e a
+    sincronização "concluía" normalmente: o token do Google ficou revogado de 04/08 a 02/10
+    sem nenhum aviso no sino."""
     brands = db.query(Brand).filter(Brand.google_ads_account_id.isnot(None)).all()
     accounts = db.query(GoogleAdsAccount).all()
     accounts_by_id = {a.id: a for a in accounts}
@@ -555,6 +586,8 @@ def _sync_google_ads(db: Session, days: int) -> int:
                 synced += 1
             else:
                 print(f"[sync] falha na conta Google Ads '{account.nome}' ({account.customer_id}): {erro}")
+                if erros is not None:
+                    erros.append((account.nome, erro))
 
     return synced
 
@@ -590,6 +623,17 @@ def _sync_google_account(db: Session, account: GoogleAdsAccount, account_brands:
     cache.orcamento_diario = orcamento
     cache.status = status
     cache.atualizado_em = datetime.utcnow()
+
+    # --- saldo da conta, direto do Google (nunca calculado a partir do orçamento mensal) ---
+    # Demo não tem de onde tirar saldo de verdade, então fica vazio em vez de inventado. Falha
+    # só nesta consulta não derruba o resto da conta: o saldo fica vazio ("—" na tela).
+    cache.saldo = None
+    if not GOOGLE_ADS_DEMO_MODE:
+        try:
+            balanco = google_ads_client.get_account_balance(account.customer_id)
+            cache.saldo = balanco["saldo"] if balanco else None
+        except Exception as exc:
+            print(f"[sync] não consegui ler o saldo da conta Google '{account.nome}': {exc}")
 
     # --- gasto/cliques/conversões diários ---
     # Cada marca aqui tem sua própria conta do Google Ads (1:1), então os dados

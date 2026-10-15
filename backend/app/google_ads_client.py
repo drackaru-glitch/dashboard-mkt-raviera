@@ -29,7 +29,16 @@ def _get_access_token() -> str:
         },
         timeout=20,
     )
-    resp.raise_for_status()
+    if not resp.is_success:
+        # Mensagem pensada pra aparecer no sino: quem lê precisa saber o que fazer, não ver a
+        # URL e o texto cru do erro HTTP. `invalid_grant` = token revogado/expirado.
+        try:
+            motivo = resp.json().get("error", "")
+        except Exception:
+            motivo = ""
+        raise RuntimeError(
+            f"Google recusou o token de acesso ({resp.status_code} {motivo}) — gere um novo com backend/gerar_token_google.py"
+        )
     return resp.json()["access_token"]
 
 
@@ -72,6 +81,44 @@ def get_account_budget_and_status(customer_id: str) -> dict:
     orcamento = sum(int(r.get("campaignBudget", {}).get("amountMicros", 0)) for r in rows) / 1_000_000
     status = "ENABLED" if rows else "SEM_CAMPANHAS_ATIVAS"
     return {"orcamento_diario": orcamento, "status": status}
+
+
+def get_account_balance(customer_id: str) -> dict | None:
+    """Saldo da conta direto do Google: limite de gasto aprovado (já com os ajustes) menos o
+    quanto já foi gasto contra ele — é o "orçamento da conta" (account_budget), o mesmo que o
+    Google usa pra parar de veicular quando o dinheiro carregado acaba.
+
+    Devolve None quando a conta NÃO tem esse conceito (sem orçamento aprovado, ou com limite
+    ilimitado — conta de cartão/faturamento mensal): nesses casos não existe saldo pra mostrar,
+    e a tela mostra "—" em vez de inventar um número."""
+    query = """
+        SELECT
+          account_budget.status,
+          account_budget.approved_spending_limit_type,
+          account_budget.adjusted_spending_limit_micros,
+          account_budget.amount_served_micros,
+          account_budget.approved_start_date_time,
+          account_budget.approved_end_date_time
+        FROM account_budget
+        WHERE account_budget.status = 'APPROVED'
+    """
+    agora = date.today().strftime("%Y-%m-%d")
+    vigentes = []
+    for r in _search(customer_id, query):
+        b = r.get("accountBudget", {})
+        fim = (b.get("approvedEndDateTime") or "")[:10]
+        if fim and fim < agora:
+            continue  # orçamento que já terminou
+        if "adjustedSpendingLimitMicros" not in b:
+            continue  # sem limite (INFINITE): não há saldo a calcular
+        vigentes.append(b)
+    if not vigentes:
+        return None
+    # Em condição normal só há um vigente; se houver mais, vale o que começou por último.
+    b = max(vigentes, key=lambda x: x.get("approvedStartDateTime", ""))
+    limite = int(b["adjustedSpendingLimitMicros"]) / 1_000_000
+    gasto = int(b.get("amountServedMicros", 0)) / 1_000_000
+    return {"saldo": round(max(limite - gasto, 0.0), 2), "limite": round(limite, 2), "gasto": round(gasto, 2)}
 
 
 def get_daily_metrics(customer_id: str, days: int = 30) -> list[dict]:

@@ -403,6 +403,13 @@ class GoogleAccountCache(Base):
     google_ads_account_id = Column(Integer, ForeignKey("google_ads_accounts.id"), unique=True, nullable=False)
     orcamento_diario = Column(Float, default=0)
     status = Column(String, default="")  # ENABLED, PAUSED, etc.
+    # Saldo vindo do próprio Google (limite de gasto aprovado − já gasto; ver
+    # google_ads_client.get_account_balance). None = a conta não tem esse conceito ou a
+    # consulta falhou — a tela mostra "—", nunca um número calculado a partir de outra coisa.
+    saldo = Column(Float, nullable=True)
+    # Já avisamos que o saldo zerou? Garante UM aviso por vez que a conta zera (não um a cada
+    # sincronização); volta a False quando entra dinheiro, pra avisar de novo na próxima vez.
+    saldo_zerado_alertado = Column(Boolean, nullable=True)
     atualizado_em = Column(DateTime, default=datetime.utcnow)
 
     google_ads_account = relationship("GoogleAdsAccount")

@@ -54,6 +54,14 @@ def _migrar_colunas_novas():
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE token_saude ADD COLUMN alertado BOOLEAN"))
 
+    colunas_google_cache = {c["name"] for c in inspect(engine).get_columns("google_account_cache")}
+    if "saldo" not in colunas_google_cache:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE google_account_cache ADD COLUMN saldo FLOAT"))
+    if "saldo_zerado_alertado" not in colunas_google_cache:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE google_account_cache ADD COLUMN saldo_zerado_alertado BOOLEAN"))
+
     colunas_ad_accounts = {c["name"] for c in inspect(engine).get_columns("ad_accounts")}
     if "billing_business_id" not in colunas_ad_accounts:
         with engine.begin() as conn:

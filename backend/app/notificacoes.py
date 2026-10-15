@@ -28,6 +28,8 @@ Todos os tipos abaixo são derivados de dados que a sincronização já buscou d
     e roda, só não é gasto por completo.
   - orcamento_zerado: nenhuma campanha ativa com orçamento no Meta, mas a marca tem um
     orçamento planejado — sinal de que tudo foi pausado.
+  - saldo_google_zerado: conta do Google Ads sem saldo (o Google informa limite aprovado − já
+    gasto ≈ 0) — as campanhas param de veicular. Gerado depois da sincronização do Google.
   - token_saude: token do Meta/Instagram inválido ou perto de vencer.
   - falha_sync: alguma parte da sincronização (Meta, Google, Instagram...) falhou.
 
@@ -43,6 +45,7 @@ from sqlalchemy.orm import Session
 from app.models import (
     Brand,
     DailyMetric,
+    GoogleAccountCache,
     MetaAprendizadoAlertado,
     MetaPublicoSobrepostoAlertado,
     Notificacao,
@@ -142,6 +145,49 @@ def gerar_alertas_saldo(db: Session) -> int:
             criadas += 1
         for b in marcas:
             b.ultimo_status_saldo = "critico" if critico else ("ok" if dias is not None else "semDados")
+    return criadas
+
+
+# Saldo do Google abaixo disso (R$) conta como zerado: o Google deixa centavos residuais
+# (R$ 0,02, R$ 0,04) quando o dinheiro carregado acaba, e a conta já não veicula. Mesmo número
+# de GOOGLE_SALDO_ZERADO no index.html (cor vermelha na tabela) — duplicado de propósito, igual
+# ao RUNWAY_CRITICO_DIAS.
+GOOGLE_SALDO_ZERADO = 1.0
+
+
+def gerar_alertas_saldo_google(db: Session) -> int:
+    """Uma notificação por conta Google no momento em que o saldo ZERA (transição), presa à
+    marca da conta. Sincronizar de novo com a conta ainda zerada não gera nada; quando entra
+    dinheiro o estado volta ao normal e a próxima vez que zerar avisa de novo.
+
+    Saldo `None` (a conta não informa saldo, ou a consulta falhou) não mexe no estado: não é
+    "zerou" nem "voltou" — é "não sei"."""
+    criadas = 0
+    for cache in db.query(GoogleAccountCache).all():
+        if cache.saldo is None:
+            continue
+        zerado = cache.saldo < GOOGLE_SALDO_ZERADO
+        if zerado and not cache.saldo_zerado_alertado:
+            marcas = (
+                db.query(Brand).filter(Brand.google_ads_account_id == cache.google_ads_account_id).order_by(Brand.id).all()
+            )
+            if marcas:  # conta sem marca ligada não tem pra quem avisar
+                mensagem = (
+                    f"O Google informa saldo de {_fmt_brl(cache.saldo)} nesta conta — as campanhas param de "
+                    "veicular até entrar um novo pagamento."
+                )
+                if cache.orcamento_diario:
+                    mensagem += f" Orçamento diário configurado: {_fmt_brl(cache.orcamento_diario)}/dia."
+                db.add(
+                    Notificacao(
+                        tipo="saldo_google_zerado",
+                        titulo=f"Google Ads sem saldo: {marcas[0].nome}",
+                        mensagem=mensagem,
+                        brand_id=marcas[0].id,
+                    )
+                )
+                criadas += 1
+        cache.saldo_zerado_alertado = zerado
     return criadas
 
 

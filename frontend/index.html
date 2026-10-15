@@ -113,6 +113,9 @@ async function login(email, password) {
 
 const RUNWAY_CRITICO = 3;
 const RUNWAY_ATENCAO = 7;
+// Saldo do Google abaixo disso (R$) conta como zerado: o Google deixa centavos residuais
+// (R$ 0,02, R$ 0,04) quando o dinheiro carregado acaba, e a conta já não veicula.
+const GOOGLE_SALDO_ZERADO = 1;
 
 /* ================================================================== */
 /* 2) HELPERS DE DATA / AGREGAÇÃO / FORMATAÇÃO                          */
@@ -2222,7 +2225,8 @@ function GoogleAdsDashboard({ token, dark, cardBg, mutedText, pushToast, permiss
       const agg = aggregateGoogle(recs);
       return {
         marca, orcamentoDiario: orc.orcamentoDiario || 0, status: orc.status || "",
-        orcamentoMensal: orc.orcamentoMensal || 0, gastoMesAtual: orc.gastoMesAtual || 0, saldoAtual: orc.saldoAtual || 0,
+        // Saldo vem do Google (null = a conta não informa saldo): nunca vira 0 de mentira nem é calculado aqui.
+        orcamentoMensal: orc.orcamentoMensal || 0, gastoMesAtual: orc.gastoMesAtual || 0, saldoAtual: orc.saldoAtual ?? null,
         gasto: agg.gasto, cliques: agg.cliques, conversoes: agg.conversoes, cpa: agg.cpa,
       };
     });
@@ -2231,9 +2235,13 @@ function GoogleAdsDashboard({ token, dark, cardBg, mutedText, pushToast, permiss
   const totals = useMemo(() => {
     const t = linhasOrcamento.reduce((acc, r) => {
       acc.gasto += r.gasto; acc.cliques += r.cliques; acc.conversoes += r.conversoes; acc.orcamentoDiario += r.orcamentoDiario;
-      acc.orcamentoMensal += r.orcamentoMensal; acc.saldoAtual += r.saldoAtual;
+      acc.orcamentoMensal += r.orcamentoMensal;
+      if (r.saldoAtual !== null) {
+        acc.saldoAtual += r.saldoAtual; acc.contasComSaldo += 1;
+        if (r.saldoAtual < GOOGLE_SALDO_ZERADO) acc.contasSemSaldo += 1;
+      }
       return acc;
-    }, { gasto: 0, cliques: 0, conversoes: 0, orcamentoDiario: 0, orcamentoMensal: 0, saldoAtual: 0 });
+    }, { gasto: 0, cliques: 0, conversoes: 0, orcamentoDiario: 0, orcamentoMensal: 0, saldoAtual: 0, contasComSaldo: 0, contasSemSaldo: 0 });
     t.cpa = t.conversoes > 0 ? t.gasto / t.conversoes : 0;
     return t;
   }, [linhasOrcamento]);
@@ -2314,7 +2322,9 @@ function GoogleAdsDashboard({ token, dark, cardBg, mutedText, pushToast, permiss
         <KpiCard IconComp={IconTarget} label="Cliques" value={fmtNum(currentAgg.cliques)} badgeValue={variacao(currentAgg.cliques, previousAgg.cliques)} previousValue={periodo === "comparativo" ? fmtNum(previousAgg.cliques) : undefined} previousLabel={previousLabel} dark={dark} accent="#6366f1" />
         <KpiCard IconComp={IconCheck} label="Conversões" value={fmtNum(currentAgg.conversoes)} badgeValue={variacao(currentAgg.conversoes, previousAgg.conversoes)} previousValue={periodo === "comparativo" ? fmtNum(previousAgg.conversoes) : undefined} previousLabel={previousLabel} dark={dark} accent="#a855f7" />
         {permissoes.verSaldo && (
-          <KpiCard IconComp={IconAlertCircle} label="Saldo Total" value={fmtBRL(totals.saldoAtual)} dark={dark} accent={totals.saldoAtual >= 0 ? "#10b981" : "#ef4444"} />
+          <KpiCard IconComp={IconAlertCircle} label={"Saldo Total" + (totals.contasSemSaldo > 0 ? " · " + totals.contasSemSaldo + " sem saldo" : "")}
+            value={totals.contasComSaldo > 0 ? fmtBRL(totals.saldoAtual) : "—"} dark={dark}
+            accent={totals.contasComSaldo > 0 && totals.contasSemSaldo === 0 ? "#10b981" : "#ef4444"} />
         )}
       </div>
 
@@ -2361,7 +2371,7 @@ function GoogleAdsDashboard({ token, dark, cardBg, mutedText, pushToast, permiss
       {permissoes.verSaldo && (
       <div className={"rounded-xl border p-4 overflow-x-auto " + cardBg}>
         <h2 className="text-sm font-bold mb-1">Orçamento das Contas (Google Ads)</h2>
-        <p className={"text-xs mb-4 " + mutedText}>Orçamento diário configurado nas campanhas ativas de cada conta</p>
+        <p className={"text-xs mb-4 " + mutedText}>Orçamento diário configurado nas campanhas ativas de cada conta. "Saldo Atual" é o saldo informado pelo próprio Google (limite de gasto aprovado − já gasto), lido a cada sincronização — não é calculado a partir do orçamento mensal; "—" quando a conta não informa saldo. Em vermelho: sem saldo, as campanhas param de veicular.</p>
         <table className="w-full text-sm min-w-[680px]">
           <thead><tr className={"text-left text-xs uppercase tracking-wide " + mutedText}>
             <th className="pb-2">Marca</th>
@@ -2381,7 +2391,14 @@ function GoogleAdsDashboard({ token, dark, cardBg, mutedText, pushToast, permiss
                 <td className="py-2.5 tabular-nums">{fmtNum(row.cliques)}</td>
                 <td className="py-2.5 tabular-nums">{fmtNum(row.conversoes)}</td>
                 <td className="py-2.5 tabular-nums">{fmtBRL(row.orcamentoMensal)}</td>
-                <td className={"py-2.5 tabular-nums font-semibold " + (row.saldoAtual >= 0 ? (dark ? "text-emerald-400" : "text-emerald-700") : (dark ? "text-red-400" : "text-red-700"))}>{fmtBRL(row.saldoAtual)}</td>
+                {row.saldoAtual === null ? (
+                  <td className={"py-2.5 " + mutedText} title="O Google não informa saldo para esta conta (sem orçamento da conta com limite) ou a consulta falhou na última sincronização.">—</td>
+                ) : (
+                  <td className={"py-2.5 tabular-nums font-semibold " + (row.saldoAtual < GOOGLE_SALDO_ZERADO ? (dark ? "text-red-400" : "text-red-700") : (dark ? "text-emerald-400" : "text-emerald-700"))}
+                    title={row.saldoAtual < GOOGLE_SALDO_ZERADO ? "Sem saldo no Google: as campanhas param de veicular até entrar um novo pagamento." : "Saldo informado pelo Google: limite de gasto aprovado menos o que já foi gasto."}>
+                    {fmtBRL(row.saldoAtual)}
+                  </td>
+                )}
                 <td className="py-2.5 tabular-nums">{fmtBRL(row.orcamentoDiario)}</td>
                 <td className="py-2.5">
                   <span className={"inline-flex items-center gap-1 rounded-full px-2 py-1 text-xs font-semibold " + (row.status === "ENABLED" ? (dark ? "bg-emerald-500/10 text-emerald-400" : "bg-emerald-50 text-emerald-700") : (dark ? "bg-neutral-500/10 text-neutral-400" : "bg-neutral-100 text-neutral-500"))}>
@@ -2398,7 +2415,9 @@ function GoogleAdsDashboard({ token, dark, cardBg, mutedText, pushToast, permiss
               <td className="py-2.5 tabular-nums">{fmtNum(totals.cliques)}</td>
               <td className="py-2.5 tabular-nums">{fmtNum(totals.conversoes)}</td>
               <td className="py-2.5 tabular-nums">{fmtBRL(totals.orcamentoMensal)}</td>
-              <td className={"py-2.5 tabular-nums " + (totals.saldoAtual >= 0 ? (dark ? "text-emerald-400" : "text-emerald-700") : (dark ? "text-red-400" : "text-red-700"))}>{fmtBRL(totals.saldoAtual)}</td>
+              <td className={"py-2.5 tabular-nums " + (totals.contasComSaldo === 0 ? mutedText : totals.contasSemSaldo > 0 ? (dark ? "text-red-400" : "text-red-700") : (dark ? "text-emerald-400" : "text-emerald-700"))}>
+                {totals.contasComSaldo > 0 ? fmtBRL(totals.saldoAtual) : "—"}
+              </td>
               <td className="py-2.5 tabular-nums">{fmtBRL(totals.orcamentoDiario)}</td>
               <td className="py-2.5"></td>
             </tr>
@@ -3724,6 +3743,7 @@ function DraggableBlock({ id, className, style, dark, isDragging, isOver, onDrag
 
 const NOTIFICACAO_ESTILO = {
   saldo_critico: { IconComp: IconAlertCircle, cor: "text-red-500" },
+  saldo_google_zerado: { IconComp: IconAlertCircle, cor: "text-red-500" },
   gasto_anomalo: { IconComp: IconAlertTriangle, cor: "text-amber-500" },
   queda_leads: { IconComp: IconAlertTriangle, cor: "text-red-500" },
   alta_performance: { IconComp: IconAward, cor: "text-emerald-500" },
@@ -3847,6 +3867,22 @@ function RavieraDashboard({ token, role, email, nome, permissoes, justLoggedIn, 
   const [customStart, setCustomStart] = useState("");
   const [customEnd, setCustomEnd] = useState("");
   const [sortConfig, setSortConfig] = useState({ key: "status", dir: "asc" });
+
+  // Marcas marcadas na coluna "Seleção" da tabela de saldo. Fica no navegador (como a ordem
+  // dos quadros), por nome da marca — sobrevive a recarregar a página e a cada sincronização.
+  const [selecao, setSelecao] = useState(() => {
+    try { return new Set(JSON.parse(localStorage.getItem("fefo_saldo_selecao") || "[]")); } catch (e) { return new Set(); }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("fefo_saldo_selecao", JSON.stringify([...selecao])); } catch (e) { /* sem storage: só não persiste */ }
+  }, [selecao]);
+  function alternarSelecao(marca) {
+    setSelecao((atual) => {
+      const novo = new Set(atual);
+      if (novo.has(marca)) novo.delete(marca); else novo.add(marca);
+      return novo;
+    });
+  }
 
   // Ordem dos quadros do painel principal — cada pessoa que usa o FEFO neste navegador pode
   // arrastar os quadros pra montar o painel do jeito que faz mais sentido pra ela.
@@ -4020,6 +4056,8 @@ function RavieraDashboard({ token, role, email, nome, permissoes, justLoggedIn, 
     arr.sort((a, b) => {
       let av, bv;
       if (key === "status") { av = STATUS_ORDER[a.status]; bv = STATUS_ORDER[b.status]; }
+      // Crescente = marcadas primeiro (mesma lógica do status, onde o 1º clique traz o que importa).
+      else if (key === "selecao") { av = selecao.has(a.marca) ? 0 : 1; bv = selecao.has(b.marca) ? 0 : 1; }
       else if (key === "diasRestantes") { av = a.diasRestantes === null ? Infinity : a.diasRestantes; bv = b.diasRestantes === null ? Infinity : b.diasRestantes; }
       else if (key === "orcamentoReal") { av = a.orcamentoReal ?? Infinity; bv = b.orcamentoReal ?? Infinity; }
       else { av = a[key]; bv = b[key]; }
@@ -4027,7 +4065,7 @@ function RavieraDashboard({ token, role, email, nome, permissoes, justLoggedIn, 
       return (av - bv) * mult;
     });
     return arr;
-  }, [linhasSaldo, sortConfig]);
+  }, [linhasSaldo, sortConfig, selecao]);
 
   const totalsSaldo = useMemo(() => {
     const contasSomadas = new Set();
@@ -4469,6 +4507,7 @@ function RavieraDashboard({ token, role, email, nome, permissoes, justLoggedIn, 
                           <SortableTh label="Orç. Real (Meta)" sortKey="orcamentoReal" sortConfig={sortConfig} onSort={handleSort} />
                           <SortableTh label="Runway" sortKey="diasRestantes" sortConfig={sortConfig} onSort={handleSort} />
                           <SortableTh label="Status" sortKey="status" sortConfig={sortConfig} onSort={handleSort} />
+                          <SortableTh label="Seleção" sortKey="selecao" sortConfig={sortConfig} onSort={handleSort} />
                         </tr></thead>
                         <tbody className={"divide-y " + (dark ? "divide-neutral-800" : "divide-neutral-100")}>
                           {linhasSaldoOrdenadas.map((row) => (
@@ -4524,6 +4563,10 @@ function RavieraDashboard({ token, role, email, nome, permissoes, justLoggedIn, 
                                 ) : "—"}
                               </td>
                               <td className="py-2.5"><StatusPill status={row.status} dark={dark} /></td>
+                              <td className="py-2.5">
+                                <input type="checkbox" checked={selecao.has(row.marca)} onChange={() => alternarSelecao(row.marca)}
+                                  aria-label={"Selecionar " + row.marca} className="h-4 w-4 cursor-pointer accent-blue-600" />
+                              </td>
                             </tr>
                           ))}
                         </tbody>
@@ -4542,6 +4585,7 @@ function RavieraDashboard({ token, role, email, nome, permissoes, justLoggedIn, 
                                 {contasEmRisco} conta{contasEmRisco === 1 ? "" : "s"} em risco
                               </span>
                             </td>
+                            <td className="py-2.5"></td>
                           </tr>
                         </tfoot>
                       </table>
